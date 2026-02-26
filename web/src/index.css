@@ -151,6 +151,85 @@ textarea {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  transition: width 0.2s ease, min-width 0.2s ease;
+}
+
+.sidebar.collapsed {
+  width: 64px;
+  min-width: 64px;
+}
+
+.sidebar.collapsed .sidebar-title,
+.sidebar.collapsed .nav-section-label,
+.sidebar.collapsed .user-info,
+.sidebar.collapsed .nav-item span {
+  display: none;
+}
+
+.sidebar.collapsed .sidebar-header {
+  padding: 0 16px;
+  justify-content: center;
+  gap: 0;
+}
+
+.sidebar.collapsed .collapse-toggle {
+  display: none;
+}
+
+.sidebar.collapsed .nav-item {
+  justify-content: center;
+  padding: 10px 0;
+  gap: 0;
+}
+
+.sidebar.collapsed .nav-item svg {
+  margin: 0;
+}
+
+.sidebar.collapsed .sidebar-footer {
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.sidebar.collapsed .user-badge {
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 4px;
+  align-items: center;
+}
+
+.sidebar.collapsed .user-avatar {
+  width: 28px;
+  height: 28px;
+  font-size: 11px;
+}
+
+.sidebar.collapsed .theme-toggle {
+  margin: 0;
+}
+
+.collapse-toggle {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  margin-left: auto;
+  flex-shrink: 0;
+  transition: color 0.15s;
+}
+
+.collapse-toggle:hover {
+  color: var(--text-primary);
+}
+
+.sidebar.collapsed .collapse-toggle {
+  margin: 0;
 }
 
 .sidebar-header {
@@ -160,6 +239,7 @@ textarea {
   padding: 0 20px;
   gap: 12px;
   border-bottom: 1px solid var(--border-subtle);
+  position: relative;
 }
 
 .sidebar-logo {
@@ -467,7 +547,6 @@ textarea {
 
 .btn-primary:hover {
   background: var(--accent-hover);
-  box-shadow: 0 0 20px rgba(99, 102, 241, 0.3);
 }
 
 .btn-secondary {

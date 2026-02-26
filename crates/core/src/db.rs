@@ -27,6 +27,19 @@ pub async fn init_pool(database_url: &str) -> anyhow::Result<DbPool> {
 
 /// Run database migrations
 async fn run_migrations(pool: &DbPool) -> anyhow::Result<()> {
+    // ─── Migrate existing databases first ───────────────
+    // Must run before CREATE INDEX which references new columns.
+    // ALTER TABLE ADD COLUMN fails if column already exists → ignore errors.
+    let alter_migrations = vec![
+        "ALTER TABLE photos ADD COLUMN is_favorite BOOLEAN NOT NULL DEFAULT 0",
+        "ALTER TABLE photos ADD COLUMN deleted_at DATETIME",
+        "ALTER TABLE photos ADD COLUMN phash TEXT",
+        "ALTER TABLE albums ADD COLUMN share_password TEXT",
+    ];
+    for sql in alter_migrations {
+        let _ = sqlx::query(sql).execute(pool).await;
+    }
+
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS users (

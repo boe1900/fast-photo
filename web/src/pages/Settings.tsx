@@ -182,7 +182,7 @@ export default function Settings() {
                                 <HardDrive />
                                 <h2>还没有图库</h2>
                                 <p>添加图库路径来导入您的照片</p>
-                                <button className="btn btn-primary" onClick={() => setShowAddModal(true)}>
+                                <button className="btn btn-secondary" onClick={() => setShowAddModal(true)}>
                                     <FolderPlus size={16} />
                                     添加图库
                                 </button>
