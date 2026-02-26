@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { photoApi } from '../api';
+import type { AxiosError } from 'axios';
+import { libraryApi, photoApi } from '../api';
 import PhotoViewer from '../components/PhotoViewer';
 import { Image, Play, Heart, Trash2, Upload, X } from 'lucide-react';
 import { format } from 'date-fns';
@@ -105,11 +106,22 @@ export default function Timeline() {
             formData.append('file', file);
         }
         try {
+            const libs = await libraryApi.list();
+            if (!Array.isArray(libs.data) || libs.data.length === 0) {
+                alert('请先在“设置 -> 图库管理”中创建图库，再上传照片。');
+                return;
+            }
             await photoApi.upload(formData);
             loadPhotos(1);
             setPage(1);
         } catch (err) {
             console.error('Upload failed:', err);
+            const message =
+                (err as AxiosError<{ error?: string }>).response?.data?.error ||
+                ((err as AxiosError).response?.status === 400
+                    ? '上传失败：请先创建图库。'
+                    : '上传失败，请重试。');
+            alert(message);
         } finally {
             setUploading(false);
         }
@@ -145,7 +157,7 @@ export default function Timeline() {
                     <div className="empty-state">
                         <Image />
                         <h2>还没有照片</h2>
-                        <p>前往设置页面添加图库路径，然后扫描照片。也可以直接上传文件。</p>
+                        <p>前往设置页面添加图库路径，然后扫描照片。</p>
                     </div>
                 </div>
                 <input ref={fileInputRef} type="file" multiple accept="image/*,video/*" hidden

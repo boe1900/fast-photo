@@ -269,6 +269,12 @@ export default function Settings() {
         { key: 'storage' as const, label: '存储配置', icon: <Server size={16} /> },
         { key: 'activity' as const, label: '活动日志', icon: <Clock size={16} /> },
     ];
+    const isLocalStorage = activeStorageType === 'local';
+    const libraryPathLabel = isLocalStorage ? '本地文件夹路径' : '远端前缀路径';
+    const libraryPathPlaceholder = isLocalStorage ? '例如：/Users/cola/Pictures' : '例如：team/photos';
+    const libraryPathHint = isLocalStorage
+        ? '本地存储：填写本机已存在的绝对路径（如 /Users/cola/Pictures）。'
+        : 'S3/WebDAV：填写远端存储中的前缀路径（不是本机路径），如 team/photos。';
 
     return (
         <>
@@ -676,15 +682,18 @@ export default function Settings() {
                                 />
                             </div>
                             <div className="form-group">
-                                <label>文件夹路径</label>
+                                <label>{libraryPathLabel}</label>
                                 <input
                                     className="form-input"
                                     type="text"
-                                    placeholder="例如：/photos/family"
+                                    placeholder={libraryPathPlaceholder}
                                     value={newPath}
                                     onChange={(e) => setNewPath(e.target.value)}
                                     required
                                 />
+                                <p style={{ marginTop: '6px', fontSize: '12px', color: 'var(--text-muted)' }}>
+                                    {libraryPathHint}
+                                </p>
                             </div>
                             <div className="modal-actions">
                                 <button type="button" className="btn btn-secondary" onClick={() => setShowAddModal(false)}>

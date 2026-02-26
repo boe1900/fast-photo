@@ -675,7 +675,6 @@ async fn upload_photo(
     let libs = db::get_libraries(&state.db, auth.user_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
     if libs.is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
