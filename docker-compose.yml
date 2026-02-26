@@ -1,0 +1,13 @@
+services:
+  fast-photo:
+    build: .
+    container_name: fast-photo
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+      - ./thumbnails:/app/thumbnails
+      - /path/to/your/photos:/photos:ro  # Mount your photo directory here
+    environment:
+      - RUST_LOG=fast_photo=info
+    restart: unless-stopped

@@ -1,0 +1,401 @@
+# FastPhoto — 基于 Rust 的自托管照片管理系统
+
+> 复刻 [MT Photos](https://mtmt.tech) 的核心功能，使用 Rust 构建高性能、低资源占用的自托管照片管理方案。
+
+## MT Photos 功能分析
+
+通过对 MT Photos 官网及其 Demo 的深入研究，以下是其核心功能：
+
+![MT Photos 首页](mt_photos_homepage.png)
+
+| 功能模块 | 具体能力 |
+|---------|--------|
+| **时间线浏览** | 按拍摄日期组织照片，支持年/月快速跳转滚动条 |
+| **文件夹浏览** | 映射底层文件系统目录结构，保留用户原有整理方式 |
+| **人脸识别** | 自动检测和聚类人脸，生成人物相册 |
+| **场景分类** | 基于图片内容分类（海滩、演唱会、花卉、截图等） |
+| **语义搜索 (CLIP)** | 自然语言搜索照片（如"夜晚的烟花"、"草地上的狗"） |
+| **OCR 文字识别** | 搜索包含特定文字的照片 |
+| **地点相册** | 提取 EXIF GPS 信息，在地图上展示照片分布 |
+| **Live Photos** | 支持无损备份、下载、显示 |
+| **影集分享** | 创建影集并分享给家人和朋友 |
+| **多用户管理** | 独立账户和细粒度权限控制 |
+| **图库管理** | 定义多个图库路径，分配给不同用户 |
+| **手机备份** | 支持按年月分文件夹、按日期命名等规则 |
+| **维护工具** | 重复文件检测、后台任务调度、视频转码 |
+| **部署方式** | Docker 自托管，跨平台客户端 (Web/iOS/Android/Desktop) |
+
+---
+
+## 技术架构方案
+
+```mermaid
+graph TB
+    subgraph Client["客户端层"]
+        Web["Web 前端 (Leptos/Yew)"]
+        Mobile["移动端 (Flutter/跨平台)"]
+    end
+
+    subgraph API["API 网关"]
+        Axum["Axum HTTP Server"]
+        WS["WebSocket (实时通知)"]
+    end
+
+    subgraph Core["核心服务层 (Rust)"]
+        Scanner["文件扫描引擎"]
+        Thumbnailer["缩略图生成"]
+        EXIF["EXIF 元数据解析"]
+        Search["全文/语义搜索"]
+    end
+
+    subgraph AI["AI 处理层"]
+        CLIP["CLIP 语义搜索"]
+        Face["人脸识别 (InsightFace)"]
+        Scene["场景分类"]
+        OCR["OCR 文字识别"]
+    end
+
+    subgraph Storage["存储层"]
+        SQLite["SQLite 数据库"]
+        FS["文件系统 (原始照片)"]
+        Cache["缩略图缓存"]
+    end
+
+    Web --> Axum
+    Mobile --> Axum
+    Axum --> Core
+    Axum --> WS
+    Core --> AI
+    Core --> Storage
+    AI --> Storage
+```
+
+---
+
+## 技术选型
+
+| 层次 | 技术选择 | 选择理由 |
+|-----|---------|---------|
+| **HTTP 框架** | `axum` | Tokio 生态，性能极佳，类型安全的路由和中间件 |
+| **数据库** | `SQLite` + `sqlx` | 单文件部署，适合自托管场景，无需额外数据库服务 |
+| **图像处理** | `image` + `libvips` (FFI) | `image` 处理基础操作，`libvips` 高性能处理大图 |
+| **EXIF 解析** | `kamadak-exif` / `rexiv2` | 纯 Rust EXIF 读取，支持 GPS、日期等关键信息 |
+| **文件监控** | `notify` | 跨平台文件系统事件监听 |
+| **AI 推理** | `ort` (ONNX Runtime) | 统一的 AI 模型推理框架，支持 CPU/GPU |
+| **前端** | `Leptos` (SSR + WASM) | 全 Rust 技术栈，或可选 React/Vue 等传统前端 |
+| **认证** | `jsonwebtoken` + `argon2` | JWT Token 认证 + 安全密码哈希 |
+| **容器化** | `Docker` | 多阶段构建，最小化镜像 |
+| **视频处理** | `ffmpeg` (CLI 调用) | 视频缩略图、转码 |
+
+---
+
+## 分阶段开发路线
+
+### 🚀 Phase 1 — 基础骨架（MVP，约 2-3 周）
+
+核心目标：能跑起来、能看照片
+
+- [ ] **项目脚手架**
+  - Cargo workspace 组织 (`fast-photo-server`、`fast-photo-core`、`fast-photo-web`)
+  - 配置管理 (`config.toml`)
+  - 日志系统 (`tracing`)
+- [ ] **用户系统**
+  - 管理员初始化向导
+  - JWT 认证 + 登录/注册 API
+  - 多用户 & 权限 (admin / user)
+- [ ] **图库管理**
+  - 添加/删除图库路径
+  - 文件系统目录递归扫描
+  - EXIF 元数据提取（日期、GPS、相机信息）
+  - 数据入库写入 SQLite
+- [ ] **缩略图生成**
+  - 多尺寸缩略图 (small: 256px, medium: 720px, large: 1920px)
+  - WebP 格式输出，节省存储
+  - 后台异步队列处理
+- [ ] **基础 Web UI**
+  - 照片时间线展示（瀑布流/网格）
+  - 文件夹视图
+  - 照片详情查看 + EXIF 信息显示
+  - 响应式布局
+
+---
+
+### 🤖 Phase 2 — AI 智能分类（约 3-4 周）
+
+- [ ] **人脸识别**
+  - 集成 InsightFace ONNX 模型
+  - 人脸检测 + 特征提取
+  - 聚类算法自动分组
+  - 人物相册 UI
+- [ ] **场景分类**
+  - 基于 CLIP 或 ResNet 模型对照片打标签
+  - 自动生成场景相册（风景、美食、截图等）
+- [ ] **语义搜索**
+  - CLIP 模型生成图像向量
+  - 文本 → 向量 → 相似度搜索
+  - 搜索 UI + 高级搜索过滤
+- [ ] **OCR**
+  - PaddleOCR / Tesseract ONNX 模型
+  - 图片内文字索引
+  - 搜索集成
+
+---
+
+### 📱 Phase 3 — 高级功能（约 2-3 周）
+
+- [ ] **地图视图**
+  - GPS 坐标 → 地理位置反查
+  - 基于 Leaflet/MapBox 的地图展示
+  - 按地点聚合照片
+- [ ] **影集分享**
+  - 创建影集 + 添加照片
+  - 生成分享链接（含可选密码保护）
+  - 分享页面浏览
+- [ ] **手机备份**
+  - WebDAV 协议支持
+  - 或自定义备份 API
+  - 文件命名规则配置
+- [ ] **Live Photos**
+  - MOV + HEIC 联合显示
+  - 播放交互支持
+- [ ] **视频支持**
+  - 视频缩略图提取 (ffmpeg)
+  - Web 端视频播放
+  - 视频转码（可选）
+
+---
+
+### 🐳 Phase 4 — 部署 & 优化（约 1-2 周）
+
+- [ ] **Docker 部署**
+  - 多阶段构建 Dockerfile
+  - docker-compose 一键部署
+  - 环境变量配置
+- [ ] **性能优化**
+  - 虚拟滚动列表（大量照片）
+  - CDN 友好的缓存策略
+  - 后台任务并发控制
+- [ ] **维护工具**
+  - 重复文件检测
+  - 存储统计面板
+  - 数据库维护
+
+---
+
+## 项目目录结构
+
+```
+fast-photo/
+├── Cargo.toml                    # Workspace 根配置
+├── config.toml                   # 运行配置
+├── docker-compose.yml
+├── Dockerfile
+│
+├── crates/
+│   ├── server/                   # HTTP 服务 (axum)
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       ├── main.rs
+│   │       ├── routes/           # API 路由
+│   │       │   ├── mod.rs
+│   │       │   ├── auth.rs       # 认证相关
+│   │       │   ├── photos.rs     # 照片 CRUD
+│   │       │   ├── albums.rs     # 相册/影集
+│   │       │   ├── search.rs     # 搜索
+│   │       │   └── admin.rs      # 管理接口
+│   │       ├── middleware/       # 中间件
+│   │       ├── error.rs          # 统一错误处理
+│   │       └── state.rs          # 应用状态
+│   │
+│   ├── core/                     # 核心业务逻辑
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       ├── scanner.rs        # 文件扫描引擎
+│   │       ├── thumbnailer.rs    # 缩略图生成
+│   │       ├── exif.rs           # EXIF 提取
+│   │       ├── models.rs         # 数据模型
+│   │       └── db.rs             # 数据库操作
+│   │
+│   ├── ai/                       # AI 推理模块
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       ├── clip.rs           # CLIP 语义搜索
+│   │       ├── face.rs           # 人脸识别
+│   │       ├── scene.rs          # 场景分类
+│   │       └── ocr.rs            # OCR 文字识别
+│   │
+│   └── common/                   # 共享工具
+│       ├── Cargo.toml
+│       └── src/
+│           ├── lib.rs
+│           ├── config.rs         # 配置解析
+│           └── error.rs          # 错误类型
+│
+├── web/                          # 前端项目
+│   ├── package.json
+│   ├── src/
+│   │   ├── App.tsx
+│   │   ├── pages/
+│   │   │   ├── Timeline.tsx      # 时间线页面
+│   │   │   ├── Folders.tsx       # 文件夹页面
+│   │   │   ├── Explore.tsx       # 发现/AI 分类
+│   │   │   ├── Map.tsx           # 地图视图
+│   │   │   ├── Search.tsx        # 搜索页面
+│   │   │   ├── Share.tsx         # 分享页面
+│   │   │   └── Settings.tsx      # 设置页面
+│   │   └── components/
+│   │       ├── PhotoGrid.tsx     # 照片网格
+│   │       ├── PhotoViewer.tsx   # 照片查看器
+│   │       ├── Sidebar.tsx       # 侧边栏导航
+│   │       └── FaceCluster.tsx   # 人物聚类
+│   └── ...
+│
+├── migrations/                   # 数据库迁移
+│   └── 001_init.sql
+│
+└── models/                       # AI 模型文件 (通过脚本下载)
+    └── download.sh
+```
+
+---
+
+## 数据库核心表设计
+
+```sql
+-- 用户表
+CREATE TABLE users (
+    id          INTEGER PRIMARY KEY,
+    username    TEXT UNIQUE NOT NULL,
+    password    TEXT NOT NULL,         -- argon2 哈希
+    role        TEXT DEFAULT 'user',   -- admin / user
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 图库表
+CREATE TABLE libraries (
+    id          INTEGER PRIMARY KEY,
+    name        TEXT NOT NULL,
+    path        TEXT NOT NULL,
+    user_id     INTEGER REFERENCES users(id),
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 照片表
+CREATE TABLE photos (
+    id              INTEGER PRIMARY KEY,
+    file_path       TEXT UNIQUE NOT NULL,
+    file_name       TEXT NOT NULL,
+    file_size       INTEGER,
+    file_hash       TEXT,              -- SHA256
+    mime_type       TEXT,
+    width           INTEGER,
+    height          INTEGER,
+    taken_at        DATETIME,          -- EXIF 拍摄日期
+    latitude        REAL,
+    longitude       REAL,
+    camera_make     TEXT,
+    camera_model    TEXT,
+    library_id      INTEGER REFERENCES libraries(id),
+    clip_embedding  BLOB,              -- CLIP 向量
+    ocr_text        TEXT,
+    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 人脸数据表
+CREATE TABLE faces (
+    id              INTEGER PRIMARY KEY,
+    photo_id        INTEGER REFERENCES photos(id),
+    person_id       INTEGER REFERENCES persons(id),
+    bbox_x          REAL,
+    bbox_y          REAL,
+    bbox_w          REAL,
+    bbox_h          REAL,
+    embedding       BLOB               -- 人脸特征向量
+);
+
+-- 人物表
+CREATE TABLE persons (
+    id          INTEGER PRIMARY KEY,
+    name        TEXT,
+    cover_face_id INTEGER,
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 标签/场景表
+CREATE TABLE tags (
+    id          INTEGER PRIMARY KEY,
+    name        TEXT UNIQUE NOT NULL,
+    category    TEXT                    -- scene / object / type
+);
+
+CREATE TABLE photo_tags (
+    photo_id    INTEGER REFERENCES photos(id),
+    tag_id      INTEGER REFERENCES tags(id),
+    confidence  REAL,
+    PRIMARY KEY (photo_id, tag_id)
+);
+
+-- 影集/分享表
+CREATE TABLE albums (
+    id          INTEGER PRIMARY KEY,
+    name        TEXT NOT NULL,
+    user_id     INTEGER REFERENCES users(id),
+    share_token TEXT UNIQUE,
+    password    TEXT,
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+---
+
+## 关键设计决策
+
+### 1. 前端选择
+
+有两种方案可选：
+
+| 方案 | 优势 | 劣势 |
+|-----|-----|-----|
+| **React/Vue + Vite** | 生态成熟，UI 组件丰富，开发效率高 | 非全 Rust 栈 |
+| **Leptos (Rust WASM)** | 全 Rust 技术栈，类型安全 | 生态尚年轻，UI 组件较少 |
+
+> [!IMPORTANT]
+> **建议：Phase 1 使用 React + Vite**，因为照片管理 UI 需要大量成熟的组件（虚拟滚动、图片懒加载、手势操作），这些在 React 生态中开箱即用。后续可考虑迁移。
+
+### 2. AI 模型部署
+
+- 所有 AI 模型通过 **ONNX Runtime** (`ort` crate) 统一推理
+- 默认使用 CPU 推理，通过编译 Feature 开启 CUDA/CoreML 加速
+- 模型按需下载，不打包在 Docker 镜像中
+- 提供独立的 AI Worker 进程，可按需启停
+
+### 3. 存储策略
+
+- **不移动原始文件**：和 MT Photos 一样，只建立索引引用
+- 缩略图缓存在 `data/thumbnails/` 目录
+- 数据库和配置在 `data/` 目录
+- Docker 通过 Volume 挂载照片和数据目录
+
+---
+
+## 验证计划
+
+### Phase 1 验证
+1. **编译检查**：`cargo build` 全量编译无错误
+2. **API 测试**：使用 `cargo test` 运行单元/集成测试
+3. **浏览器测试**：启动服务后通过浏览器访问，验证照片时间线、文件夹浏览、登录流程
+4. **手动验证**：导入一个包含 EXIF 数据的照片文件夹，验证扫描、缩略图生成、元数据提取
+
+---
+
+## 第一步行动
+
+如果方案获批，我将立即开始 **Phase 1** 的实现：
+
+1. 初始化 Cargo workspace 项目结构
+2. 搭建 Axum HTTP 服务
+3. 实现用户认证系统
+4. 实现文件扫描 + EXIF 解析 + 缩略图生成
+5. 搭建基础 Web UI（React + Vite）

@@ -1,0 +1,43 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# AI Models
+*.onnx
+Cargo.lock
+
+# Node / Frontend
+web/node_modules/
+web/dist/
+web/.vite/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+
+# Thumbnails & cache
+data/
+thumbnails/
+uploads/
+
+# OS
+Thumbs.db

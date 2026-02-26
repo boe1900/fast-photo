@@ -1,0 +1,17 @@
+[package]
+name = "fast-photo-ai"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fast-photo-common = { path = "../common" }
+fast-photo-core = { path = "../core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+image = { workspace = true }
+ort = { version = "2.0.0-rc.11", features = ["download-binaries"] }
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }

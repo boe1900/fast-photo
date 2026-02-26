@@ -1,0 +1,26 @@
+[package]
+name = "fast-photo-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fast-photo-common = { path = "../common" }
+tokio = { workspace = true }
+sqlx = { workspace = true }
+image = { workspace = true }
+kamadak-exif = { workspace = true }
+notify = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+argon2 = { workspace = true }
+walkdir = "2"
+rust-s3 = { workspace = true }
+reqwest = { workspace = true }
+async-trait = { workspace = true }
