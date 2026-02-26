@@ -196,4 +196,109 @@ test.describe('API Share and AuthZ', () => {
     });
     expect(forbiddenAlbumAdd.status()).toBe(403);
   });
+
+  test('share password + trash + restore keep authz boundaries', async ({ request }) => {
+    const owner = await registerUser(request, 'e2e_combo_owner');
+    const outsider = await registerUser(request, 'e2e_combo_outsider');
+
+    await createLibrary(request, owner.token, `combo-owner-${Date.now()}`);
+    await createLibrary(request, outsider.token, `combo-outsider-${Date.now()}`);
+    const ownerPhotoId = await uploadViaApi(request, owner.token, `combo-${Date.now()}.png`);
+
+    const createAlbumRes = await request.post(`${API}/albums`, {
+      headers: { Authorization: `Bearer ${owner.token}` },
+      data: { name: `combo-album-${Date.now()}` },
+    });
+    expect(createAlbumRes.status()).toBe(200);
+    const createBody = await createAlbumRes.json();
+    let albumId = createBody.id as number | undefined;
+    let shareToken = createBody.share_token as string | undefined;
+    if (!albumId || !shareToken) {
+      const listRes = await request.get(`${API}/albums`, {
+        headers: { Authorization: `Bearer ${owner.token}` },
+      });
+      expect(listRes.status()).toBe(200);
+      const albums = (await listRes.json()) as Array<{ id?: number; share_token?: string }>;
+      albumId = albums[0]?.id;
+      shareToken = albums[0]?.share_token;
+    }
+    expect(albumId).toBeTruthy();
+    expect(shareToken).toBeTruthy();
+
+    const addPhotoRes = await request.post(`${API}/albums/${albumId}/photos`, {
+      headers: { Authorization: `Bearer ${owner.token}` },
+      data: { photo_ids: [ownerPhotoId] },
+    });
+    expect(addPhotoRes.status()).toBe(200);
+
+    const setPwByOwner = await request.post(`${API}/albums/${albumId}/share-password`, {
+      headers: { Authorization: `Bearer ${owner.token}` },
+      data: { password: 'combo-secret' },
+    });
+    expect(setPwByOwner.status()).toBe(200);
+
+    const setPwByOutsider = await request.post(`${API}/albums/${albumId}/share-password`, {
+      headers: { Authorization: `Bearer ${outsider.token}` },
+      data: { password: 'hijack' },
+    });
+    expect(setPwByOutsider.status()).toBe(403);
+
+    const noPwShared = await request.get(`${API}/share/${shareToken}/photos`);
+    expect(noPwShared.status()).toBe(401);
+
+    const sharedWithPw = await request.get(`${API}/share/${shareToken}/photos`, {
+      headers: { 'x-share-password': 'combo-secret' },
+    });
+    expect(sharedWithPw.status()).toBe(200);
+    const sharedBeforeTrash = await sharedWithPw.json();
+    expect(sharedBeforeTrash.total).toBe(1);
+
+    const outsiderTrash = await request.post(`${API}/photos/${ownerPhotoId}/trash`, {
+      headers: { Authorization: `Bearer ${outsider.token}` },
+    });
+    expect(outsiderTrash.status()).toBe(403);
+
+    const ownerTrash = await request.post(`${API}/photos/${ownerPhotoId}/trash`, {
+      headers: { Authorization: `Bearer ${owner.token}` },
+    });
+    expect(ownerTrash.status()).toBe(200);
+
+    const ownerTrashList = await request.get(`${API}/photos/trash`, {
+      headers: { Authorization: `Bearer ${owner.token}` },
+    });
+    expect(ownerTrashList.status()).toBe(200);
+    const ownerTrashBody = await ownerTrashList.json();
+    const trashedIds = (ownerTrashBody.data || []).map((p: { id: number }) => p.id);
+    expect(trashedIds).toContain(ownerPhotoId);
+
+    const outsiderRestore = await request.post(`${API}/photos/${ownerPhotoId}/restore`, {
+      headers: { Authorization: `Bearer ${outsider.token}` },
+    });
+    expect(outsiderRestore.status()).toBe(403);
+
+    const outsiderDetail = await request.get(`${API}/photos/${ownerPhotoId}`, {
+      headers: { Authorization: `Bearer ${outsider.token}` },
+    });
+    expect(outsiderDetail.status()).toBe(403);
+
+    const ownerRestore = await request.post(`${API}/photos/${ownerPhotoId}/restore`, {
+      headers: { Authorization: `Bearer ${owner.token}` },
+    });
+    expect(ownerRestore.status()).toBe(200);
+
+    const ownerTrashAfterRestore = await request.get(`${API}/photos/trash`, {
+      headers: { Authorization: `Bearer ${owner.token}` },
+    });
+    expect(ownerTrashAfterRestore.status()).toBe(200);
+    const ownerTrashAfterRestoreBody = await ownerTrashAfterRestore.json();
+    const trashIdsAfterRestore = (ownerTrashAfterRestoreBody.data || []).map((p: { id: number }) => p.id);
+    expect(trashIdsAfterRestore).not.toContain(ownerPhotoId);
+
+    const sharedAfterRestore = await request.get(`${API}/share/${shareToken}/photos`, {
+      headers: { 'x-share-password': 'combo-secret' },
+    });
+    expect(sharedAfterRestore.status()).toBe(200);
+    const sharedAfterRestoreBody = await sharedAfterRestore.json();
+    expect(sharedAfterRestoreBody.total).toBe(1);
+  });
 });
