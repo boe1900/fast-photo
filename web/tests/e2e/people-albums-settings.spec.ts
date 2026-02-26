@@ -1,4 +1,5 @@
 import { expect, test, type APIRequestContext, type Dialog, type Page } from '@playwright/test';
+import { execSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
@@ -7,6 +8,44 @@ const SAMPLE_PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO6pFf0AAAAASUVORK5CYII=',
   'base64'
 );
+const ENABLE_STORAGE_UI_E2E = process.env.FASTPHOTO_ENABLE_STORAGE_UI_E2E === '1';
+const STORAGE_COMPOSE_PROJECT = 'fast-photo-storage-ui-e2e';
+const STORAGE_COMPOSE_FILE = path.resolve(process.cwd(), '..', 'docker-compose.storage-backends.yml');
+const STORAGE_BUCKET = 'fast-photo-ui-test';
+
+function runShell(cmd: string): void {
+  execSync(cmd, { stdio: 'ignore' });
+}
+
+async function waitForHttp(url: string, tries = 120): Promise<void> {
+  let lastError = '';
+  for (let i = 0; i < tries; i += 1) {
+    try {
+      const res = await fetch(url);
+      if (res.ok) return;
+      lastError = `status=${res.status}`;
+    } catch (err) {
+      lastError = String(err);
+    }
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  throw new Error(`Timeout waiting for ${url}: ${lastError}`);
+}
+
+async function waitForWebDav(url: string, tries = 120): Promise<void> {
+  let lastError = '';
+  for (let i = 0; i < tries; i += 1) {
+    try {
+      const res = await fetch(url);
+      if (res.status > 0 && res.status < 500) return;
+      lastError = `status=${res.status}`;
+    } catch (err) {
+      lastError = String(err);
+    }
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  throw new Error(`Timeout waiting for WebDAV ${url}: ${lastError}`);
+}
 
 interface AuthUser {
   username: string;
@@ -139,5 +178,69 @@ test.describe('People Albums Settings', () => {
     await page.getByRole('button', { name: '活动日志' }).click();
     await expect(page.getByRole('heading', { name: '活动日志' })).toBeVisible();
     await expect(page.getByText('添加标签')).toBeVisible({ timeout: 10000 });
+  });
+
+  test.describe('storage remote backends (ui)', () => {
+    test.setTimeout(180000);
+    test.skip(!ENABLE_STORAGE_UI_E2E, 'Set FASTPHOTO_ENABLE_STORAGE_UI_E2E=1 to run remote storage UI test');
+
+    test.beforeAll(async ({}, testInfo) => {
+      testInfo.setTimeout(180000);
+      runShell(`docker compose -p ${STORAGE_COMPOSE_PROJECT} -f "${STORAGE_COMPOSE_FILE}" up -d`);
+      await waitForHttp('http://127.0.0.1:19000/minio/health/ready');
+      await waitForWebDav('http://127.0.0.1:19080/');
+      runShell(
+        `docker run --rm --network ${STORAGE_COMPOSE_PROJECT}_default -e "MC_HOST_local=http://minioadmin:minioadmin123@minio:9000" minio/mc mb -p local/${STORAGE_BUCKET}`
+      );
+    });
+
+    test.afterAll(async () => {
+      runShell(`docker compose -p ${STORAGE_COMPOSE_PROJECT} -f "${STORAGE_COMPOSE_FILE}" down -v`);
+    });
+
+    test('settings page can test and save S3/WebDAV configs', async ({ page, request }) => {
+      const user = await registerUser(request, 'e2e_storage_ui');
+      await loginByUi(page, user.username, user.password);
+
+      await page.getByRole('button', { name: '设置' }).click();
+      await expect(page).toHaveURL(/\/settings$/);
+      await page.getByRole('button', { name: '存储配置' }).click();
+      await expect(page.getByRole('heading', { name: '存储配置' })).toBeVisible();
+
+      const s3Card = page.locator('.storage-card').filter({
+        has: page.getByRole('heading', { name: 'S3 兼容存储' }),
+      });
+      await s3Card.getByPlaceholder('https://s3.amazonaws.com').fill('http://127.0.0.1:19000');
+      await s3Card.getByPlaceholder('us-east-1').fill('us-east-1');
+      await s3Card.getByPlaceholder('my-photos-bucket').fill(STORAGE_BUCKET);
+      await s3Card.getByPlaceholder('AKIAIOSFODNN7').fill('minioadmin');
+      await s3Card.getByPlaceholder('••••••••').first().fill('wrong-secret');
+      await s3Card.getByRole('button', { name: '测试 S3 连接' }).click();
+      await expect(page.getByText('连接失败')).toBeVisible({ timeout: 15000 });
+
+      await s3Card.getByPlaceholder('••••••••').first().fill('minioadmin123');
+      await s3Card.getByRole('button', { name: '测试 S3 连接' }).click();
+      await expect(page.getByText('连接成功')).toBeVisible({ timeout: 15000 });
+      await s3Card.getByRole('button', { name: '保存 S3 配置' }).click();
+      await expect(page.getByText('存储配置已保存')).toBeVisible({ timeout: 15000 });
+
+      const webDavCard = page.locator('.storage-card').filter({
+        has: page.getByRole('heading', { name: 'WebDAV' }),
+      });
+      await webDavCard.getByPlaceholder('https://example.com/webdav').fill('http://127.0.0.1:19080');
+      await webDavCard.getByPlaceholder('admin').fill('webdav_user');
+      await webDavCard.getByPlaceholder('••••••••').first().fill('wrong-pass');
+      await webDavCard.getByRole('button', { name: '测试 WebDAV 连接' }).click();
+      await expect(page.getByText('连接失败')).toBeVisible({ timeout: 15000 });
+
+      await webDavCard.getByPlaceholder('••••••••').first().fill('webdav_pass');
+      await webDavCard.getByRole('button', { name: '测试 WebDAV 连接' }).click();
+      await expect(page.getByText('连接成功')).toBeVisible({ timeout: 15000 });
+      await webDavCard.getByRole('button', { name: '保存 WebDAV 配置' }).click();
+      await expect(page.getByText('存储配置已保存')).toBeVisible({ timeout: 15000 });
+      await expect(
+        webDavCard.getByText('当前使用'),
+      ).toBeVisible({ timeout: 15000 });
+    });
   });
 });
