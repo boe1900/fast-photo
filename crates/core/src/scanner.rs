@@ -182,7 +182,7 @@ async fn process_file(pool: &DbPool, file_path: &Path, library_id: i64) -> anyho
         file_path: file_path_str,
         file_name,
         file_size,
-        file_hash: Some(file_hash),
+        file_hash: Some(file_hash.clone()),
         mime_type: mime.clone(),
         width,
         height,
@@ -195,6 +195,20 @@ async fn process_file(pool: &DbPool, file_path: &Path, library_id: i64) -> anyho
     };
 
     let photo_id = db::upsert_photo(pool, &insert).await?;
+
+    if mime.starts_with("image/") {
+        let phash = match crate::dedup::compute_dhash(file_path) {
+            Ok(phash) => Some(phash),
+            Err(e) => {
+                // Fallback to exact hash so duplicate detection still works for unsupported images.
+                tracing::debug!("Failed to compute dHash for {:?}: {}", file_path, e);
+                Some(file_hash.clone())
+            }
+        };
+        if let Some(phash) = phash {
+            let _ = db::update_phash(pool, photo_id, &phash).await;
+        }
+    }
 
     // For videos, extract duration and update
     if is_video {

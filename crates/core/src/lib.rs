@@ -1,4 +1,5 @@
 pub mod db;
+pub mod dedup;
 pub mod exif;
 pub mod models;
 pub mod scanner;
