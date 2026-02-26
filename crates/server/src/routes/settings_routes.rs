@@ -52,22 +52,25 @@ async fn test_storage_config(
 
     match &config {
         RemoteStorageConfig::Local { path } => {
-            let metadata = tokio::fs::metadata(path).await.map_err(|e| {
-                bad_request_error(format!("本地路径不可访问: {}", e))
-            })?;
+            let metadata = tokio::fs::metadata(path)
+                .await
+                .map_err(|e| bad_request_error(format!("本地路径不可访问: {}", e)))?;
             if !metadata.is_dir() {
                 return Err(bad_request_error("本地路径必须是目录"));
             }
-            let _ = tokio::fs::read_dir(path).await.map_err(|e| {
-                bad_request_error(format!("本地路径不可读取: {}", e))
-            })?;
+            let _ = tokio::fs::read_dir(path)
+                .await
+                .map_err(|e| bad_request_error(format!("本地路径不可读取: {}", e)))?;
             Ok(Json(json!({"ok": true, "message": "本地存储连接成功"})))
         }
         _ => {
-            let cache_dir = state.config.storage.thumbnail_dir.join("storage-test-cache");
-            let backend = create_storage(&config, &cache_dir).map_err(|e| {
-                bad_request_error(format!("创建存储客户端失败: {}", e))
-            })?;
+            let cache_dir = state
+                .config
+                .storage
+                .thumbnail_dir
+                .join("storage-test-cache");
+            let backend = create_storage(&config, &cache_dir)
+                .map_err(|e| bad_request_error(format!("创建存储客户端失败: {}", e)))?;
 
             let probe = tokio::time::timeout(Duration::from_secs(10), backend.list_files("")).await;
             match probe {
@@ -122,7 +125,10 @@ fn default_storage_config(state: &AppState) -> RemoteStorageConfig {
 }
 
 fn bad_request_error(msg: impl Into<String>) -> (StatusCode, Json<Value>) {
-    (StatusCode::BAD_REQUEST, Json(json!({ "error": msg.into() })))
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({ "error": msg.into() })),
+    )
 }
 
 fn internal_error(err: impl std::fmt::Display) -> (StatusCode, Json<Value>) {

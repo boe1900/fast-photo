@@ -33,7 +33,7 @@ cd web && FASTPHOTO_ENABLE_STORAGE_UI_E2E=1 npm run test:e2e
 # E2E（含登录限流 429 恢复窗口回归，建议 CI 参数）
 cd web && FASTPHOTO_ENABLE_STORAGE_UI_E2E=1 FASTPHOTO_LOGIN_LIMIT_WINDOW_SECS=5 FASTPHOTO_LOGIN_MAX_FAILURES=5 npm run test:e2e
 
-# 远程存储连通性联调（MinIO + WebDAV）
+# 远程存储主链路联调（MinIO + WebDAV，覆盖上传/原图/缩略图/回收站清空/永久删除）
 ./scripts/test_storage_backends.sh
 ```
 
@@ -88,7 +88,7 @@ cd web && FASTPHOTO_ENABLE_STORAGE_UI_E2E=1 FASTPHOTO_LOGIN_LIMIT_WINDOW_SECS=5 
 
 ## 5. 已知差距（当前版本）
 
-1. 存储配置已支持按用户保存与连通性测试；但扫描/上传主流程仍默认本地文件系统，远程存储读写尚未切换到主链路。
+1. 远程存储已接入上传、原图读取、按需缩略图生成、回收站清理、AI 分析、人脸扫描，以及“远端源头扫描入库（含嵌套目录）”；当前主要改进空间是超大目录扫描时的分页与性能优化。
 2. 旧历史图片若未重新扫描，可能没有 `phash`，重复检测覆盖不完整。
 3. 当前 E2E 已覆盖登录、核心导航、上传、回收站恢复、分享密码 API、跨用户越权，并新增“分享密码 + 回收站 + 越权边界”“分享密码移除后恢复公开访问”“batch 收藏/回收站操作仅影响本人照片”“empty_trash + permanent_delete 权限与数据边界”“重名上传自动重命名 + 清空回收站后可复用原文件名”“相册删除后 share token 生命周期失效”“auth/me token 边界（缺失/格式错误/伪造）”以及“登录限流 429 恢复窗口”组合回归场景；同时覆盖地图空态、发现页标签/AI 按钮行为、文件夹/收藏/重复页面，以及人物空态、相册创建删除、设置页活动日志与本地存储配置测试。
 4. CI 已配置在 `.github/workflows/ci.yml`，默认执行 `cargo test` + `S3/WebDAV 联调` + `web build` + `web e2e`。

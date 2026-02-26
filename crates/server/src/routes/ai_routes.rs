@@ -4,10 +4,12 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::path::PathBuf;
 
 use fast_photo_ai::clip;
 use fast_photo_core::db;
 use fast_photo_core::models::PaginationParams;
+use fast_photo_core::storage::{create_storage, StorageConfig as RemoteStorageConfig};
 
 use crate::auth::AuthUser;
 use crate::state::AppState;
@@ -18,6 +20,39 @@ pub fn routes() -> Router<AppState> {
         .route("/tags/:id/photos", get(photos_by_tag))
         .route("/semantic-search", get(semantic_search))
         .route("/process", post(process_ai))
+}
+
+fn default_storage_config(state: &AppState) -> RemoteStorageConfig {
+    RemoteStorageConfig::Local {
+        path: state.config.storage.data_dir.to_string_lossy().to_string(),
+    }
+}
+
+async fn user_storage_config(
+    state: &AppState,
+    user_id: i64,
+) -> Result<RemoteStorageConfig, StatusCode> {
+    let cfg = db::get_storage_config(&state.db, user_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .unwrap_or_else(|| default_storage_config(state));
+    Ok(cfg)
+}
+
+fn storage_backend_for_user(
+    state: &AppState,
+    user_id: i64,
+    cfg: &RemoteStorageConfig,
+    scope: &str,
+) -> Result<Box<dyn fast_photo_core::storage::StorageBackend>, StatusCode> {
+    let cache_dir = state
+        .config
+        .storage
+        .thumbnail_dir
+        .join("runtime_storage_cache")
+        .join(format!("u{}", user_id))
+        .join(scope);
+    create_storage(cfg, &cache_dir).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// List all tags with photo counts
@@ -191,6 +226,28 @@ async fn process_ai(
             )
         })?;
     let lib_ids: Vec<i64> = libs.iter().map(|l| l.id).collect();
+    let storage_cfg = user_storage_config(&state, auth.user_id)
+        .await
+        .map_err(|status| {
+            (
+                status,
+                Json(json!({"error": "failed to load user storage config"})),
+            )
+        })?;
+    let mut remote_backend = if matches!(&storage_cfg, RemoteStorageConfig::Local { .. }) {
+        None
+    } else {
+        Some(
+            storage_backend_for_user(&state, auth.user_id, &storage_cfg, "ai-process").map_err(
+                |status| {
+                    (
+                        status,
+                        Json(json!({"error": "failed to initialize remote storage backend"})),
+                    )
+                },
+            )?,
+        )
+    };
 
     let pool = state.db.clone();
 
@@ -217,16 +274,31 @@ async fn process_ai(
                 continue;
             }
 
-            let path = std::path::Path::new(&photo.file_path);
-            if !path.exists() {
+            let source_path = if let Some(backend) = &mut remote_backend {
+                match backend.get_local_path(&photo.file_path).await {
+                    Ok(path) => path,
+                    Err(e) => {
+                        tracing::warn!(
+                            photo_id = photo.id,
+                            file_path = %photo.file_path,
+                            error = %e,
+                            "AI: failed to resolve remote source path"
+                        );
+                        continue;
+                    }
+                }
+            } else {
+                PathBuf::from(&photo.file_path)
+            };
+            if !source_path.exists() {
                 continue;
             }
 
             // Load image
-            let img = match image::open(path) {
+            let img = match image::open(&source_path) {
                 Ok(img) => img,
                 Err(e) => {
-                    tracing::warn!("Failed to open {:?}: {}", path, e);
+                    tracing::warn!("Failed to open {:?}: {}", source_path, e);
                     continue;
                 }
             };

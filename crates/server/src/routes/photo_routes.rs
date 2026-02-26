@@ -5,12 +5,14 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::path::PathBuf;
 use tokio_util::io::ReaderStream;
 
 use fast_photo_core::db;
 use fast_photo_core::dedup;
 use fast_photo_core::models::PaginationParams;
 use fast_photo_core::scanner;
+use fast_photo_core::storage::{create_storage, StorageConfig as RemoteStorageConfig};
 use fast_photo_core::thumbnailer::{self, ThumbnailSize};
 
 use crate::auth::AuthUser;
@@ -36,6 +38,53 @@ async fn ensure_photo_access(
         Ok(())
     } else {
         Err(StatusCode::FORBIDDEN)
+    }
+}
+
+fn default_storage_config(state: &AppState) -> RemoteStorageConfig {
+    RemoteStorageConfig::Local {
+        path: state.config.storage.data_dir.to_string_lossy().to_string(),
+    }
+}
+
+async fn user_storage_config(
+    state: &AppState,
+    user_id: i64,
+) -> Result<RemoteStorageConfig, StatusCode> {
+    let cfg = db::get_storage_config(&state.db, user_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .unwrap_or_else(|| default_storage_config(state));
+    Ok(cfg)
+}
+
+fn storage_backend_for_user(
+    state: &AppState,
+    user_id: i64,
+    cfg: &RemoteStorageConfig,
+    scope: &str,
+) -> Result<Box<dyn fast_photo_core::storage::StorageBackend>, StatusCode> {
+    let cache_dir = state
+        .config
+        .storage
+        .thumbnail_dir
+        .join("runtime_storage_cache")
+        .join(format!("u{}", user_id))
+        .join(scope);
+    create_storage(cfg, &cache_dir).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+fn next_upload_name(original_file_name: &str, counter: u32) -> String {
+    let path = std::path::Path::new(original_file_name);
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("upload");
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+    if ext.is_empty() {
+        format!("{} ({})", stem, counter)
+    } else {
+        format!("{} ({}).{}", stem, counter, ext)
     }
 }
 
@@ -216,19 +265,82 @@ async fn thumbnail(
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
             .ok_or(StatusCode::NOT_FOUND)?;
 
-        let source = std::path::Path::new(&photo.file_path);
-        if photo.mime_type.starts_with("video/") {
-            thumbnailer::generate_video_thumbnail(source, &state.config.storage.thumbnail_dir, id)
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let storage_cfg = user_storage_config(&state, auth.user_id).await?;
+        let mut source = PathBuf::from(&photo.file_path);
+        let mut temp_source: Option<PathBuf> = None;
+        if !matches!(&storage_cfg, RemoteStorageConfig::Local { .. }) {
+            let backend = storage_backend_for_user(&state, auth.user_id, &storage_cfg, "thumb")?;
+            match backend.get_local_path(&photo.file_path).await {
+                Ok(remote_local_path) => {
+                    source = remote_local_path;
+                }
+                Err(cache_err) => {
+                    tracing::warn!(
+                        photo_id = id,
+                        file_path = %photo.file_path,
+                        error = %cache_err,
+                        "Failed to cache remote file for thumbnail, falling back to temp download"
+                    );
+                    let data = backend.read_file(&photo.file_path).await.map_err(|err| {
+                        tracing::error!(
+                            photo_id = id,
+                            file_path = %photo.file_path,
+                            error = %err,
+                            "Failed to read remote file for thumbnail"
+                        );
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })?;
+                    let ext = std::path::Path::new(&photo.file_path)
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("bin");
+                    let tmp_path = std::env::temp_dir().join(format!(
+                        "fast-photo-thumb-src-{}-{}.{}",
+                        id,
+                        uuid::Uuid::new_v4(),
+                        ext
+                    ));
+                    tokio::fs::write(&tmp_path, &data).await.map_err(|err| {
+                        tracing::error!(
+                            photo_id = id,
+                            path = %tmp_path.to_string_lossy(),
+                            error = %err,
+                            "Failed to write temporary thumbnail source"
+                        );
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })?;
+                    source = tmp_path.clone();
+                    temp_source = Some(tmp_path);
+                }
+            }
+        }
+
+        let generate_result = if photo.mime_type.starts_with("video/") {
+            thumbnailer::generate_video_thumbnail(&source, &state.config.storage.thumbnail_dir, id)
         } else {
             thumbnailer::generate_thumbnail(
-                source,
+                &source,
                 &state.config.storage.thumbnail_dir,
                 id,
                 thumb_size,
             )
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map(|_| ())
+        };
+
+        if let Some(tmp_path) = temp_source {
+            let _ = tokio::fs::remove_file(tmp_path).await;
         }
+
+        generate_result.map_err(|err| {
+            tracing::error!(
+                photo_id = id,
+                source = %source.to_string_lossy(),
+                mime_type = %photo.mime_type,
+                error = %err,
+                "Failed to generate thumbnail"
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
     }
 
     let file = tokio::fs::File::open(&thumb_path)
@@ -263,12 +375,25 @@ async fn original(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
+    let storage_cfg = user_storage_config(&state, auth.user_id).await?;
+    if !matches!(&storage_cfg, RemoteStorageConfig::Local { .. }) {
+        let backend = storage_backend_for_user(&state, auth.user_id, &storage_cfg, "original")?;
+        if let Ok(data) = backend.read_file(&photo.file_path).await {
+            return Ok((
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, photo.mime_type.clone()),
+                    (header::CACHE_CONTROL, "public, max-age=86400".to_string()),
+                ],
+                Body::from(data),
+            ));
+        }
+    }
+
     let file = tokio::fs::File::open(&photo.file_path)
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
-
-    let stream = ReaderStream::new(file);
-    let body = Body::from_stream(stream);
+    let body = Body::from_stream(ReaderStream::new(file));
 
     Ok((
         StatusCode::OK,
@@ -401,11 +526,25 @@ async fn permanent_delete(
     Path(id): Path<i64>,
 ) -> Result<StatusCode, StatusCode> {
     ensure_photo_access(&state, auth.user_id, id).await?;
+    let storage_cfg = user_storage_config(&state, auth.user_id).await?;
+    let remote_backend = if matches!(&storage_cfg, RemoteStorageConfig::Local { .. }) {
+        None
+    } else {
+        Some(storage_backend_for_user(
+            &state,
+            auth.user_id,
+            &storage_cfg,
+            "delete",
+        )?)
+    };
     let file_path = db::permanent_delete(&state.db, id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    // Optionally delete physical file
-    let _ = tokio::fs::remove_file(&file_path).await;
+    if let Some(backend) = remote_backend {
+        let _ = backend.delete_file(&file_path).await;
+    } else {
+        let _ = tokio::fs::remove_file(&file_path).await;
+    }
     Ok(StatusCode::OK)
 }
 
@@ -436,6 +575,17 @@ async fn empty_trash(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, StatusCode> {
     let lib_ids = user_library_ids(&state, auth.user_id).await?;
+    let storage_cfg = user_storage_config(&state, auth.user_id).await?;
+    let remote_backend = if matches!(&storage_cfg, RemoteStorageConfig::Local { .. }) {
+        None
+    } else {
+        Some(storage_backend_for_user(
+            &state,
+            auth.user_id,
+            &storage_cfg,
+            "empty-trash",
+        )?)
+    };
 
     let paths = db::empty_trash(&state.db, &lib_ids)
         .await
@@ -443,7 +593,11 @@ async fn empty_trash(
 
     // Best-effort remove of underlying files after DB rows are deleted.
     for path in &paths {
-        let _ = tokio::fs::remove_file(path).await;
+        if let Some(backend) = &remote_backend {
+            let _ = backend.delete_file(path).await;
+        } else {
+            let _ = tokio::fs::remove_file(path).await;
+        }
     }
 
     let count = paths.len();
@@ -526,10 +680,23 @@ async fn upload_photo(
         return Err(StatusCode::BAD_REQUEST);
     }
     let library = &libs[0]; // Use first library as upload target
+    let storage_cfg = user_storage_config(&state, auth.user_id).await?;
+    let mut remote_backend = if matches!(&storage_cfg, RemoteStorageConfig::Local { .. }) {
+        None
+    } else {
+        Some(storage_backend_for_user(
+            &state,
+            auth.user_id,
+            &storage_cfg,
+            "upload",
+        )?)
+    };
     let upload_dir = std::path::Path::new(&library.path).join("Uploads");
-    tokio::fs::create_dir_all(&upload_dir)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if remote_backend.is_none() {
+        tokio::fs::create_dir_all(&upload_dir)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
 
     let mut uploaded = Vec::new();
 
@@ -545,35 +712,62 @@ async fn upload_photo(
             .to_string();
         let data = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
 
-        // Keep existing files and choose an available filename suffix.
         let mut file_name = original_file_name.clone();
-        let mut dest_path = upload_dir.join(&file_name);
-        let mut counter = 1u32;
-        while tokio::fs::try_exists(&dest_path)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        {
-            let path = std::path::Path::new(&original_file_name);
-            let stem = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("upload");
-            let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-            file_name = if ext.is_empty() {
-                format!("{} ({})", stem, counter)
-            } else {
-                format!("{} ({}).{}", stem, counter, ext)
-            };
-            dest_path = upload_dir.join(&file_name);
-            counter += 1;
+        let stored_path: String;
+        let analysis_source: PathBuf;
+        let mut cleanup_temp: Option<PathBuf> = None;
+
+        if let Some(backend) = remote_backend.as_mut() {
+            let upload_prefix = format!("library-{}/Uploads", library.id);
+            let mut counter = 1u32;
+            let mut remote_path = format!("{}/{}", upload_prefix, file_name);
+            while backend
+                .exists(&remote_path)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            {
+                file_name = next_upload_name(&original_file_name, counter);
+                remote_path = format!("{}/{}", upload_prefix, file_name);
+                counter += 1;
+            }
+
+            backend
+                .write_file(&remote_path, &data)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            stored_path = remote_path;
+
+            let tmp_path = std::env::temp_dir().join(format!(
+                "fast-photo-upload-{}-{}",
+                auth.user_id,
+                uuid::Uuid::new_v4()
+            ));
+            tokio::fs::write(&tmp_path, &data)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            analysis_source = tmp_path.clone();
+            cleanup_temp = Some(tmp_path);
+        } else {
+            // Keep existing files and choose an available filename suffix.
+            let mut dest_path = upload_dir.join(&file_name);
+            let mut counter = 1u32;
+            while tokio::fs::try_exists(&dest_path)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            {
+                file_name = next_upload_name(&original_file_name, counter);
+                dest_path = upload_dir.join(&file_name);
+                counter += 1;
+            }
+
+            tokio::fs::write(&dest_path, &data)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            stored_path = dest_path.to_string_lossy().to_string();
+            analysis_source = dest_path;
         }
 
-        tokio::fs::write(&dest_path, &data)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
         let file_size = data.len() as i64;
-        let path_str = dest_path.to_string_lossy().to_string();
 
         // Calculate file hash for dedup
         use sha2::{Digest, Sha256};
@@ -581,7 +775,7 @@ async fn upload_photo(
 
         let photo_id = db::insert_uploaded_photo(
             &state.db,
-            &path_str,
+            &stored_path,
             &file_name,
             file_size,
             &content_type,
@@ -591,10 +785,13 @@ async fn upload_photo(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        let guessed_mime = scanner::mime_type_from_extension(&dest_path);
+        let guessed_mime = scanner::mime_type_from_extension(std::path::Path::new(&file_name));
         if content_type.starts_with("image/") || guessed_mime.starts_with("image/") {
-            let phash = dedup::compute_dhash(&dest_path).unwrap_or_else(|_| hash.clone());
+            let phash = dedup::compute_dhash(&analysis_source).unwrap_or_else(|_| hash.clone());
             let _ = db::update_phash(&state.db, photo_id, &phash).await;
+        }
+        if let Some(tmp_path) = cleanup_temp {
+            let _ = tokio::fs::remove_file(tmp_path).await;
         }
 
         uploaded.push(json!({ "id": photo_id, "file_name": file_name }));

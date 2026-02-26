@@ -141,37 +141,48 @@ pub async fn scan_library(
 }
 
 async fn process_file(pool: &DbPool, file_path: &Path, library_id: i64) -> anyhow::Result<()> {
+    process_file_with_stored_path(pool, file_path, &file_path.to_string_lossy(), library_id).await
+}
+
+/// Index a media file from `source_path` into DB while storing `stored_path` as canonical file path.
+/// For local scanning, `source_path` and `stored_path` are usually the same.
+/// For remote scanning, `source_path` points to a local cache file while `stored_path` is remote key.
+pub async fn process_file_with_stored_path(
+    pool: &DbPool,
+    source_path: &Path,
+    stored_path: &str,
+    library_id: i64,
+) -> anyhow::Result<()> {
     use crate::thumbnailer;
 
-    let metadata = std::fs::metadata(file_path)?;
-    let file_name = file_path
+    let metadata = std::fs::metadata(source_path)?;
+    let file_name = Path::new(stored_path)
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("unknown")
         .to_string();
 
-    let file_path_str = file_path.to_string_lossy().to_string();
-    let mime = mime_type_from_extension(file_path);
+    let mime = mime_type_from_extension(Path::new(stored_path));
     let file_size = metadata.len() as i64;
     let is_video = mime.starts_with("video/");
 
     // Calculate file hash
-    let file_hash = compute_file_hash(file_path)?;
+    let file_hash = compute_file_hash(source_path)?;
 
     // Extract EXIF data (images only)
     let exif_data = if !is_video {
-        exif::extract_exif(file_path)
+        exif::extract_exif(source_path)
     } else {
         None
     };
 
     // Get dimensions
     let (width, height) = if is_video {
-        thumbnailer::get_video_dimensions(file_path)
+        thumbnailer::get_video_dimensions(source_path)
             .map(|(w, h)| (Some(w), Some(h)))
             .unwrap_or((None, None))
     } else if mime.starts_with("image/") {
-        exif::get_image_dimensions(file_path)
+        exif::get_image_dimensions(source_path)
             .map(|(w, h)| (Some(w as i32), Some(h as i32)))
             .unwrap_or((None, None))
     } else {
@@ -179,7 +190,7 @@ async fn process_file(pool: &DbPool, file_path: &Path, library_id: i64) -> anyho
     };
 
     let insert = InsertPhoto {
-        file_path: file_path_str,
+        file_path: stored_path.to_string(),
         file_name,
         file_size,
         file_hash: Some(file_hash.clone()),
@@ -197,11 +208,11 @@ async fn process_file(pool: &DbPool, file_path: &Path, library_id: i64) -> anyho
     let photo_id = db::upsert_photo(pool, &insert).await?;
 
     if mime.starts_with("image/") {
-        let phash = match crate::dedup::compute_dhash(file_path) {
+        let phash = match crate::dedup::compute_dhash(source_path) {
             Ok(phash) => Some(phash),
             Err(e) => {
                 // Fallback to exact hash so duplicate detection still works for unsupported images.
-                tracing::debug!("Failed to compute dHash for {:?}: {}", file_path, e);
+                tracing::debug!("Failed to compute dHash for {:?}: {}", source_path, e);
                 Some(file_hash.clone())
             }
         };
@@ -212,7 +223,7 @@ async fn process_file(pool: &DbPool, file_path: &Path, library_id: i64) -> anyho
 
     // For videos, extract duration and update
     if is_video {
-        let duration = thumbnailer::get_video_duration(file_path);
+        let duration = thumbnailer::get_video_duration(source_path);
         if duration.is_some() {
             let _ = sqlx::query("UPDATE photos SET duration = ? WHERE id = ?")
                 .bind(duration)

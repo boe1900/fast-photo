@@ -251,21 +251,27 @@ fn login_max_failures() -> usize {
 }
 
 fn is_login_rate_limited(key: &str) -> bool {
-    let mut store = login_failures().lock().expect("login failure mutex poisoned");
+    let mut store = login_failures()
+        .lock()
+        .expect("login failure mutex poisoned");
     let attempts = store.entry(key.to_string()).or_default();
     prune_old_attempts(attempts);
     attempts.len() >= login_max_failures()
 }
 
 fn record_login_failure(key: &str) {
-    let mut store = login_failures().lock().expect("login failure mutex poisoned");
+    let mut store = login_failures()
+        .lock()
+        .expect("login failure mutex poisoned");
     let attempts = store.entry(key.to_string()).or_default();
     prune_old_attempts(attempts);
     attempts.push(Instant::now());
 }
 
 fn clear_login_failures(key: &str) {
-    let mut store = login_failures().lock().expect("login failure mutex poisoned");
+    let mut store = login_failures()
+        .lock()
+        .expect("login failure mutex poisoned");
     store.remove(key);
 }
 

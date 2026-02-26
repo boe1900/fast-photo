@@ -36,6 +36,9 @@ pub trait StorageBackend: Send + Sync {
     /// List files in a directory (relative path)
     async fn list_files(&self, dir: &str) -> Result<Vec<String>>;
 
+    /// List files recursively in a directory tree (relative path)
+    async fn list_files_recursive(&self, dir: &str) -> Result<Vec<String>>;
+
     /// Read file contents
     async fn read_file(&self, path: &str) -> Result<Vec<u8>>;
 
@@ -47,6 +50,12 @@ pub trait StorageBackend: Send + Sync {
 
     /// Get file size
     async fn file_size(&self, path: &str) -> Result<u64>;
+
+    /// Write file contents
+    async fn write_file(&self, path: &str, data: &[u8]) -> Result<()>;
+
+    /// Delete file
+    async fn delete_file(&self, path: &str) -> Result<()>;
 
     /// Storage type name
     fn storage_type(&self) -> &str;
@@ -85,6 +94,30 @@ impl StorageBackend for LocalStorage {
         Ok(files)
     }
 
+    async fn list_files_recursive(&self, dir: &str) -> Result<Vec<String>> {
+        let full_path = self.root.join(dir);
+        let mut files = Vec::new();
+        if !full_path.exists() {
+            return Ok(files);
+        }
+
+        let root = self.root.clone();
+        let target = full_path.clone();
+        for entry in walkdir::WalkDir::new(target)
+            .follow_links(true)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            if let Ok(rel) = entry.path().strip_prefix(&root) {
+                files.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
+        Ok(files)
+    }
+
     async fn read_file(&self, path: &str) -> Result<Vec<u8>> {
         let full_path = self.root.join(path);
         Ok(tokio::fs::read(&full_path).await?)
@@ -101,6 +134,24 @@ impl StorageBackend for LocalStorage {
     async fn file_size(&self, path: &str) -> Result<u64> {
         let meta = tokio::fs::metadata(self.root.join(path)).await?;
         Ok(meta.len())
+    }
+
+    async fn write_file(&self, path: &str, data: &[u8]) -> Result<()> {
+        let full_path = self.root.join(path);
+        if let Some(parent) = full_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(full_path, data).await?;
+        Ok(())
+    }
+
+    async fn delete_file(&self, path: &str) -> Result<()> {
+        let full_path = self.root.join(path);
+        match tokio::fs::remove_file(full_path).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
     }
 
     fn storage_type(&self) -> &str {
@@ -174,11 +225,33 @@ impl StorageBackend for S3Storage {
         } else {
             format!("{}/", key.trim_matches('/'))
         };
-        let results = self
-            .bucket
-            .list(prefix, Some("/".to_string()))
-            .await?;
+        let results = self.bucket.list(prefix, Some("/".to_string())).await?;
 
+        let mut files = Vec::new();
+        for result in results {
+            for obj in result.contents {
+                let rel = if self.prefix.is_empty() {
+                    obj.key.clone()
+                } else {
+                    obj.key
+                        .strip_prefix(&format!("{}/", self.prefix))
+                        .unwrap_or(&obj.key)
+                        .to_string()
+                };
+                files.push(rel);
+            }
+        }
+        Ok(files)
+    }
+
+    async fn list_files_recursive(&self, dir: &str) -> Result<Vec<String>> {
+        let key = self.full_key(dir);
+        let prefix = if key.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", key.trim_matches('/'))
+        };
+        let results = self.bucket.list(prefix, None).await?;
         let mut files = Vec::new();
         for result in results {
             for obj in result.contents {
@@ -218,16 +291,40 @@ impl StorageBackend for S3Storage {
 
     async fn exists(&self, path: &str) -> Result<bool> {
         let key = self.full_key(path);
-        match self.bucket.head_object(&key).await {
-            Ok(_) => Ok(true),
-            Err(_) => Ok(false),
+        let results = self.bucket.list(key.clone(), None).await?;
+        for result in results {
+            for obj in result.contents {
+                if obj.key == key {
+                    return Ok(true);
+                }
+            }
         }
+        Ok(false)
     }
 
     async fn file_size(&self, path: &str) -> Result<u64> {
         let key = self.full_key(path);
         let (head, _) = self.bucket.head_object(&key).await?;
         Ok(head.content_length.unwrap_or(0) as u64)
+    }
+
+    async fn write_file(&self, path: &str, data: &[u8]) -> Result<()> {
+        let key = self.full_key(path);
+        let res = self.bucket.put_object(&key, data).await?;
+        if !(200..300).contains(&res.status_code()) {
+            anyhow::bail!("S3 PUT failed: {}", res.status_code());
+        }
+        Ok(())
+    }
+
+    async fn delete_file(&self, path: &str) -> Result<()> {
+        let key = self.full_key(path);
+        let res = self.bucket.delete_object(&key).await?;
+        let code = res.status_code();
+        if !(200..300).contains(&code) && code != 404 {
+            anyhow::bail!("S3 DELETE failed: {}", code);
+        }
+        Ok(())
     }
 
     fn storage_type(&self) -> &str {
@@ -270,6 +367,7 @@ impl WebDavStorage {
     }
 
     fn full_url(&self, path: &str) -> String {
+        let path = path.trim_start_matches('/');
         if self.prefix.is_empty() {
             format!("{}/{}", self.base_url, path)
         } else {
@@ -281,13 +379,86 @@ impl WebDavStorage {
             )
         }
     }
-}
 
-#[async_trait]
-impl StorageBackend for WebDavStorage {
-    async fn list_files(&self, dir: &str) -> Result<Vec<String>> {
+    async fn ensure_parent_dirs(&self, path: &str) -> Result<()> {
+        let parent = std::path::Path::new(path).parent();
+        let Some(parent) = parent else {
+            return Ok(());
+        };
+        if parent.as_os_str().is_empty() {
+            return Ok(());
+        }
+
+        let mut current = String::new();
+        for part in parent.iter() {
+            let segment = part.to_string_lossy();
+            if segment.is_empty() {
+                continue;
+            }
+            if !current.is_empty() {
+                current.push('/');
+            }
+            current.push_str(&segment);
+            let url = self.full_url(&current);
+            let response = self
+                .client
+                .request(reqwest::Method::from_bytes(b"MKCOL")?, &url)
+                .basic_auth(&self.username, Some(&self.password))
+                .send()
+                .await?;
+            let status = response.status();
+            if !(status.is_success()
+                || status == reqwest::StatusCode::METHOD_NOT_ALLOWED
+                || status == reqwest::StatusCode::CONFLICT)
+            {
+                anyhow::bail!("WebDAV MKCOL failed ({}): {}", current, status);
+            }
+        }
+        Ok(())
+    }
+
+    fn extract_hrefs(body: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut cursor = 0usize;
+        while let Some(start_rel) = body[cursor..]
+            .find("<D:href>")
+            .or_else(|| body[cursor..].find("<d:href>"))
+        {
+            let start = cursor + start_rel + 8;
+            let rest = &body[start..];
+            if let Some(end_rel) = rest.find("</D:href>").or_else(|| rest.find("</d:href>")) {
+                out.push(rest[..end_rel].to_string());
+                cursor = start + end_rel + 9;
+            } else {
+                break;
+            }
+        }
+        out
+    }
+
+    fn rel_from_href(&self, href: &str) -> Option<String> {
+        let raw = href.trim();
+        let path = if let Ok(url) = reqwest::Url::parse(raw) {
+            url.path().to_string()
+        } else {
+            raw.to_string()
+        };
+        let mut rel = path.trim_start_matches('/').to_string();
+        if !self.prefix.is_empty() {
+            let prefix = self.prefix.trim_matches('/');
+            if rel == prefix {
+                return Some(String::new());
+            }
+            let full_prefix = format!("{}/", prefix);
+            rel = rel.strip_prefix(&full_prefix)?.to_string();
+        }
+        Some(rel.trim_matches('/').to_string())
+    }
+
+    async fn propfind_entries_depth1(&self, dir: &str) -> Result<Vec<(String, bool)>> {
         let url = self.full_url(dir);
-        let response = self.client
+        let response = self
+            .client
             .request(reqwest::Method::from_bytes(b"PROPFIND")?, &url)
             .basic_auth(&self.username, Some(&self.password))
             .header("Depth", "1")
@@ -300,26 +471,59 @@ impl StorageBackend for WebDavStorage {
         }
 
         let body = response.text().await?;
+        let mut out = Vec::new();
+        for href in Self::extract_hrefs(&body) {
+            let is_dir = href.trim_end().ends_with('/');
+            if let Some(rel) = self.rel_from_href(&href) {
+                out.push((rel, is_dir));
+            }
+        }
+        Ok(out)
+    }
+}
 
-        // Simple XML parsing for href elements
+#[async_trait]
+impl StorageBackend for WebDavStorage {
+    async fn list_files(&self, dir: &str) -> Result<Vec<String>> {
+        let dir_norm = dir.trim_matches('/').to_string();
         let mut files = Vec::new();
-        for line in body.lines() {
-            if let Some(start) = line.find("<D:href>").or_else(|| line.find("<d:href>")) {
-                let tag_end = start + 8;
-                if let Some(end) = line[tag_end..]
-                    .find("</D:href>")
-                    .or_else(|| line[tag_end..].find("</d:href>"))
-                {
-                    let href = &line[tag_end..tag_end + end];
-                    let decoded = href.trim_end_matches('/');
-                    if let Some(name) = decoded.rsplit('/').next() {
-                        if !name.is_empty() {
-                            files.push(format!("{}/{}", dir, name));
-                        }
+        for (rel, is_dir) in self.propfind_entries_depth1(dir).await? {
+            if rel.is_empty() || rel == dir_norm || is_dir {
+                continue;
+            }
+            files.push(rel);
+        }
+        Ok(files)
+    }
+
+    async fn list_files_recursive(&self, dir: &str) -> Result<Vec<String>> {
+        use std::collections::{HashSet, VecDeque};
+
+        let mut queue = VecDeque::new();
+        let root = dir.trim_matches('/').to_string();
+        queue.push_back(root.clone());
+
+        let mut seen_dirs = HashSet::new();
+        if !root.is_empty() {
+            seen_dirs.insert(root);
+        }
+        let mut files = Vec::new();
+
+        while let Some(current) = queue.pop_front() {
+            for (rel, is_dir) in self.propfind_entries_depth1(&current).await? {
+                if rel.is_empty() || rel == current {
+                    continue;
+                }
+                if is_dir {
+                    if seen_dirs.insert(rel.clone()) {
+                        queue.push_back(rel);
                     }
+                } else {
+                    files.push(rel);
                 }
             }
         }
+
         Ok(files)
     }
 
@@ -376,6 +580,37 @@ impl StorageBackend for WebDavStorage {
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
         Ok(len)
+    }
+
+    async fn write_file(&self, path: &str, data: &[u8]) -> Result<()> {
+        self.ensure_parent_dirs(path).await?;
+        let url = self.full_url(path);
+        let response = self
+            .client
+            .put(&url)
+            .basic_auth(&self.username, Some(&self.password))
+            .body(data.to_vec())
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            anyhow::bail!("WebDAV PUT failed: {}", response.status());
+        }
+        Ok(())
+    }
+
+    async fn delete_file(&self, path: &str) -> Result<()> {
+        let url = self.full_url(path);
+        let response = self
+            .client
+            .delete(&url)
+            .basic_auth(&self.username, Some(&self.password))
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() && status != reqwest::StatusCode::NOT_FOUND {
+            anyhow::bail!("WebDAV DELETE failed: {}", status);
+        }
+        Ok(())
     }
 
     fn storage_type(&self) -> &str {
