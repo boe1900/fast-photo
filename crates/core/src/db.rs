@@ -1,4 +1,5 @@
 use crate::models::*;
+use crate::storage::StorageConfig as RemoteStorageConfig;
 use fast_photo_common::AppError;
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 
@@ -158,6 +159,13 @@ async fn run_migrations(pool: &DbPool) -> anyhow::Result<()> {
             created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
         );
         CREATE INDEX IF NOT EXISTS idx_activity_user ON activity_logs(user_id);
+
+        CREATE TABLE IF NOT EXISTS storage_configs (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id     INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+            config_json TEXT NOT NULL,
+            updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
         "#,
     )
     .execute(pool)
@@ -1566,6 +1574,48 @@ pub async fn search_photos_by_tag(
 }
 
 // ─── Activity Log ──────────────────────────────
+
+pub async fn get_storage_config(
+    pool: &DbPool,
+    user_id: i64,
+) -> Result<Option<RemoteStorageConfig>, AppError> {
+    let row: Option<(String,)> = sqlx::query_as("SELECT config_json FROM storage_configs WHERE user_id = ?")
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await?;
+
+    match row {
+        Some((json_str,)) => {
+            let cfg = serde_json::from_str::<RemoteStorageConfig>(&json_str)
+                .map_err(|e| AppError::Internal(format!("Invalid stored storage config: {}", e)))?;
+            Ok(Some(cfg))
+        }
+        None => Ok(None),
+    }
+}
+
+pub async fn upsert_storage_config(
+    pool: &DbPool,
+    user_id: i64,
+    config: &RemoteStorageConfig,
+) -> Result<(), AppError> {
+    let config_json = serde_json::to_string(config)
+        .map_err(|e| AppError::Internal(format!("Failed to serialize storage config: {}", e)))?;
+
+    sqlx::query(
+        "INSERT INTO storage_configs (user_id, config_json, updated_at)
+         VALUES (?, ?, CURRENT_TIMESTAMP)
+         ON CONFLICT(user_id) DO UPDATE SET
+            config_json = excluded.config_json,
+            updated_at = CURRENT_TIMESTAMP",
+    )
+    .bind(user_id)
+    .bind(config_json)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
 
 pub async fn log_activity(
     pool: &DbPool,

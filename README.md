@@ -134,9 +134,13 @@ models_dir = "models"
 
 ---
 
-## 📖 API 文档
+## 📖 文档
 
-详见 [docs/FEATURES.md](docs/FEATURES.md)，包含所有 API 端点、请求示例和测试指引。
+- 功能与 API：`docs/FEATURES.md`
+- 测试清单：`docs/TESTING.md`
+- 部署说明：`docs/DEPLOYMENT.md`
+- 备份恢复：`docs/BACKUP.md`
+- 发版清单：`docs/RELEASE_CHECKLIST.md`
 
 ---
 

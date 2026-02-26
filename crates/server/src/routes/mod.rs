@@ -5,6 +5,7 @@ pub mod auth_routes;
 pub mod face_routes;
 pub mod library_routes;
 pub mod photo_routes;
+pub mod settings_routes;
 pub mod tag_routes;
 
 use crate::state::AppState;
@@ -17,6 +18,7 @@ pub fn api_routes() -> Router<AppState> {
         .nest("/photos", photo_routes::routes())
         .nest("/ai", ai_routes::routes())
         .nest("/albums", album_routes::routes())
+        .nest("/settings", settings_routes::routes())
         .nest("/share", album_routes::share_routes())
         .merge(face_routes::routes())
         .merge(tag_routes::routes())

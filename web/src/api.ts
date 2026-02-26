@@ -118,6 +118,37 @@ export const activityApi = {
     list: () => api.get('/activity'),
 };
 
+// ─── Storage Settings ───────────────────────────
+
+export type StorageConfig =
+    | {
+        type: 'local';
+        path: string;
+    }
+    | {
+        type: 's3';
+        bucket: string;
+        region: string;
+        endpoint: string | null;
+        access_key: string;
+        secret_key: string;
+        prefix: string | null;
+    }
+    | {
+        type: 'webdav';
+        url: string;
+        username: string;
+        password: string;
+        prefix: string | null;
+    };
+
+export const storageApi = {
+    get: () => api.get<StorageConfig>('/settings/storage'),
+    save: (config: StorageConfig) => api.put<StorageConfig>('/settings/storage', config),
+    test: (config: StorageConfig) =>
+        api.post<{ ok: boolean; message: string }>('/settings/storage/test', config),
+};
+
 // ─── Albums ─────────────────────────────────────
 
 export const albumApi = {
