@@ -3,12 +3,19 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use fast_photo_core::db;
 use fast_photo_core::models::{CreateUser, LoginRequest, LoginResponse, UserInfo};
 
 use crate::auth::{create_token, AuthUser};
 use crate::state::AppState;
+
+const LOGIN_LIMIT_WINDOW: Duration = Duration::from_secs(300);
+const LOGIN_MAX_FAILURES: usize = 10;
+static LOGIN_FAILURES: OnceLock<Mutex<HashMap<String, Vec<Instant>>>> = OnceLock::new();
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -92,6 +99,10 @@ async fn register(
         )
     })?;
 
+    if let Err(e) = db::log_activity(&state.db, user.id, "register", Some("用户注册")).await {
+        tracing::warn!("Failed to log register activity: {}", e);
+    }
+
     Ok((
         StatusCode::CREATED,
         Json(json!(LoginResponse {
@@ -110,6 +121,14 @@ async fn login(
     State(state): State<AppState>,
     Json(body): Json<LoginRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let throttle_key = body.username.trim().to_lowercase();
+    if is_login_rate_limited(&throttle_key) {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({"error": "登录失败次数过多，请稍后再试"})),
+        ));
+    }
+
     let user = db::get_user_by_username(&state.db, &body.username)
         .await
         .map_err(|_| {
@@ -119,6 +138,7 @@ async fn login(
             )
         })?
         .ok_or_else(|| {
+            record_login_failure(&throttle_key);
             (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({"error": "Invalid credentials"})),
@@ -134,11 +154,13 @@ async fn login(
     })?;
 
     if !valid {
+        record_login_failure(&throttle_key);
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(json!({"error": "Invalid credentials"})),
         ));
     }
+    clear_login_failures(&throttle_key);
 
     let token = create_token(
         user.id,
@@ -153,6 +175,10 @@ async fn login(
             Json(json!({"error": "Failed to create token"})),
         )
     })?;
+
+    if let Err(e) = db::log_activity(&state.db, user.id, "login", None).await {
+        tracing::warn!("Failed to log login activity: {}", e);
+    }
 
     Ok(Json(json!(LoginResponse {
         token,
@@ -193,4 +219,62 @@ fn verify_password(password: &str, hash: &str) -> anyhow::Result<bool> {
     Ok(Argon2::default()
         .verify_password(password.as_bytes(), &parsed_hash)
         .is_ok())
+}
+
+fn login_failures() -> &'static Mutex<HashMap<String, Vec<Instant>>> {
+    LOGIN_FAILURES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn is_login_rate_limited(key: &str) -> bool {
+    let mut store = login_failures().lock().expect("login failure mutex poisoned");
+    let attempts = store.entry(key.to_string()).or_default();
+    prune_old_attempts(attempts);
+    attempts.len() >= LOGIN_MAX_FAILURES
+}
+
+fn record_login_failure(key: &str) {
+    let mut store = login_failures().lock().expect("login failure mutex poisoned");
+    let attempts = store.entry(key.to_string()).or_default();
+    prune_old_attempts(attempts);
+    attempts.push(Instant::now());
+}
+
+fn clear_login_failures(key: &str) {
+    let mut store = login_failures().lock().expect("login failure mutex poisoned");
+    store.remove(key);
+}
+
+fn prune_old_attempts(attempts: &mut Vec<Instant>) {
+    let now = Instant::now();
+    attempts.retain(|at| now.duration_since(*at) < LOGIN_LIMIT_WINDOW);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prune_old_attempts_keeps_recent_entries_only() {
+        let now = Instant::now();
+        let mut attempts = vec![
+            now - (LOGIN_LIMIT_WINDOW + Duration::from_secs(1)),
+            now - Duration::from_secs(1),
+        ];
+        prune_old_attempts(&mut attempts);
+        assert_eq!(attempts.len(), 1);
+    }
+
+    #[test]
+    fn login_rate_limit_triggers_after_threshold() {
+        let key = format!("test-user-{}", std::process::id());
+        clear_login_failures(&key);
+
+        for _ in 0..LOGIN_MAX_FAILURES {
+            record_login_failure(&key);
+        }
+        assert!(is_login_rate_limited(&key));
+
+        clear_login_failures(&key);
+        assert!(!is_login_rate_limited(&key));
+    }
 }
