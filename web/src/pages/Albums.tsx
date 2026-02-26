@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { photoApi } from '../api';
 import PhotoViewer from '../components/PhotoViewer';
 import { BookImage, Plus, Trash2, Share2, X, Check } from 'lucide-react';
@@ -33,28 +33,35 @@ export default function Albums() {
     const [copied, setCopied] = useState(false);
 
     const token = localStorage.getItem('token');
-    const headers = { Authorization: `Bearer ${token}` };
-
-    useEffect(() => {
-        loadAlbums();
-    }, []);
-
-    const loadAlbums = async () => {
+    const loadAlbums = useCallback(async () => {
         try {
-            const res = await axios.get('/api/albums', { headers });
+            const res = await axios.get('/api/albums', {
+                headers: { Authorization: `Bearer ${token}` },
+            });
             setAlbums(res.data);
         } catch (err) {
             console.error('Failed to load albums:', err);
         }
-    };
+    }, [token]);
+
+    useEffect(() => {
+        const timer = window.setTimeout(() => {
+            void loadAlbums();
+        }, 0);
+        return () => window.clearTimeout(timer);
+    }, [loadAlbums]);
 
     const createAlbum = async () => {
         if (!newName.trim()) return;
         try {
-            await axios.post('/api/albums', { name: newName }, { headers });
+            await axios.post(
+                '/api/albums',
+                { name: newName },
+                { headers: { Authorization: `Bearer ${token}` } }
+            );
             setNewName('');
             setShowCreate(false);
-            loadAlbums();
+            await loadAlbums();
         } catch (err) {
             console.error('Failed to create album:', err);
         }
@@ -63,12 +70,14 @@ export default function Albums() {
     const deleteAlbum = async (id: number) => {
         if (!confirm('确定删除这个相册？')) return;
         try {
-            await axios.delete(`/api/albums/${id}`, { headers });
+            await axios.delete(`/api/albums/${id}`, {
+                headers: { Authorization: `Bearer ${token}` },
+            });
             if (selectedAlbum?.id === id) {
                 setSelectedAlbum(null);
                 setAlbumPhotos([]);
             }
-            loadAlbums();
+            await loadAlbums();
         } catch (err) {
             console.error('Failed to delete album:', err);
         }
@@ -77,7 +86,10 @@ export default function Albums() {
     const selectAlbum = async (album: Album) => {
         setSelectedAlbum(album);
         try {
-            const res = await axios.get(`/api/albums/${album.id}/photos`, { headers, params: { per_page: 200 } });
+            const res = await axios.get(`/api/albums/${album.id}/photos`, {
+                headers: { Authorization: `Bearer ${token}` },
+                params: { per_page: 200 },
+            });
             setAlbumPhotos(res.data.data);
         } catch (err) {
             console.error('Failed to load album photos:', err);

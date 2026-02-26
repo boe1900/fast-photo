@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import { photoApi } from '../api';
@@ -8,7 +8,8 @@ import axios from 'axios';
 import 'leaflet/dist/leaflet.css';
 
 // Fix leaflet default marker icon issue
-delete (L.Icon.Default.prototype as any)._getIconUrl;
+const iconDefaultProto = L.Icon.Default.prototype as unknown as { _getIconUrl?: string };
+delete iconDefaultProto._getIconUrl;
 L.Icon.Default.mergeOptions({
     iconRetinaUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-icon-2x.png',
     iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-icon.png',
@@ -21,6 +22,18 @@ interface GeoPhoto {
     latitude: number;
     longitude: number;
     taken_at: string | null;
+}
+
+interface ViewerPhoto {
+    id: number;
+    file_name: string;
+    taken_at: string | null;
+    created_at: string;
+    width: number | null;
+    height: number | null;
+    mime_type: string;
+    live_photo_video_path?: string | null;
+    duration?: number | null;
 }
 
 function FitBounds({ markers }: { markers: GeoPhoto[] }) {
@@ -36,31 +49,33 @@ function FitBounds({ markers }: { markers: GeoPhoto[] }) {
 
 export default function MapView() {
     const [photos, setPhotos] = useState<GeoPhoto[]>([]);
-    const [viewerPhoto, setViewerPhoto] = useState<any>(null);
+    const [viewerPhoto, setViewerPhoto] = useState<ViewerPhoto | null>(null);
     const [loading, setLoading] = useState(true);
 
     const token = localStorage.getItem('token');
-    const headers = { Authorization: `Bearer ${token}` };
-
-    useEffect(() => {
-        loadGeoPhotos();
-    }, []);
-
-    const loadGeoPhotos = async () => {
+    const loadGeoPhotos = useCallback(async () => {
         try {
-            const res = await axios.get('/api/photos/geo', { headers });
+            const res = await axios.get('/api/photos/geo', {
+                headers: { Authorization: `Bearer ${token}` },
+            });
             setPhotos(res.data);
         } catch (err) {
             console.error('Failed to load geo photos:', err);
         } finally {
             setLoading(false);
         }
-    };
+    }, [token]);
+
+    useEffect(() => {
+        loadGeoPhotos();
+    }, [loadGeoPhotos]);
 
     const openPhoto = async (photo: GeoPhoto) => {
         try {
-            const res = await axios.get(`/api/photos/${photo.id}`, { headers });
-            setViewerPhoto(res.data.photo);
+            const res = await axios.get(`/api/photos/${photo.id}`, {
+                headers: { Authorization: `Bearer ${token}` },
+            });
+            setViewerPhoto(res.data.photo as ViewerPhoto);
         } catch (err) {
             console.error('Failed to load photo details:', err);
         }
