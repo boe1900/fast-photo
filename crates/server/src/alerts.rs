@@ -88,7 +88,8 @@ mod tests {
 
     #[tokio::test]
     async fn alert_sink_writes_ndjson_line() {
-        let path = std::env::temp_dir().join(format!("fast-photo-alerts-{}.ndjson", Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("fast-photo-alerts-{}.ndjson", Uuid::new_v4()));
         let sink = AlertSink::new(path.clone());
         let event = AlertEvent::http_5xx(
             "req-1".to_string(),
@@ -99,7 +100,9 @@ mod tests {
         );
 
         sink.emit(&event).await;
-        let content = tokio::fs::read_to_string(&path).await.expect("read alert file");
+        let content = tokio::fs::read_to_string(&path)
+            .await
+            .expect("read alert file");
         assert!(content.contains("\"kind\":\"http_5xx\""));
         assert!(content.contains("\"request_id\":\"req-1\""));
 

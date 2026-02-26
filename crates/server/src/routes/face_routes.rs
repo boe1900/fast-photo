@@ -5,8 +5,10 @@ use axum::{
     Json, Router,
 };
 use fast_photo_core::db;
+use fast_photo_core::storage::{create_storage, StorageConfig as RemoteStorageConfig};
 use serde::{Deserialize, Serialize};
 use sqlx;
+use std::path::PathBuf;
 
 use crate::auth::AuthUser;
 use crate::state::AppState;
@@ -19,6 +21,39 @@ pub fn routes() -> Router<AppState> {
         .route("/faces/scan", post(scan_faces))
         .route("/faces/cluster", post(cluster_faces))
         .route("/faces/:id/thumbnail", get(face_thumbnail))
+}
+
+fn default_storage_config(state: &AppState) -> RemoteStorageConfig {
+    RemoteStorageConfig::Local {
+        path: state.config.storage.data_dir.to_string_lossy().to_string(),
+    }
+}
+
+async fn user_storage_config(
+    state: &AppState,
+    user_id: i64,
+) -> Result<RemoteStorageConfig, StatusCode> {
+    let cfg = db::get_storage_config(&state.db, user_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .unwrap_or_else(|| default_storage_config(state));
+    Ok(cfg)
+}
+
+fn storage_backend_for_user(
+    state: &AppState,
+    user_id: i64,
+    cfg: &RemoteStorageConfig,
+    scope: &str,
+) -> Result<Box<dyn fast_photo_core::storage::StorageBackend>, StatusCode> {
+    let cache_dir = state
+        .config
+        .storage
+        .thumbnail_dir
+        .join("runtime_storage_cache")
+        .join(format!("u{}", user_id))
+        .join(scope);
+    create_storage(cfg, &cache_dir).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 async fn ensure_person_access(
@@ -169,6 +204,17 @@ async fn scan_faces(
         .fetch_all(&*state.db)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let storage_cfg = user_storage_config(&state, auth.user_id).await?;
+    let mut remote_backend = if matches!(&storage_cfg, RemoteStorageConfig::Local { .. }) {
+        None
+    } else {
+        Some(storage_backend_for_user(
+            &state,
+            auth.user_id,
+            &storage_cfg,
+            "face-scan",
+        )?)
+    };
 
     let mut processed = 0u64;
     let mut faces_found = 0u64;
@@ -182,7 +228,24 @@ async fn scan_faces(
             continue;
         }
 
-        let img = match image::open(file_path) {
+        let source_path = if let Some(backend) = &mut remote_backend {
+            match backend.get_local_path(file_path).await {
+                Ok(path) => path,
+                Err(e) => {
+                    tracing::warn!(
+                        photo_id = photo_id,
+                        file_path = %file_path,
+                        error = %e,
+                        "Face scan: failed to resolve remote source path"
+                    );
+                    continue;
+                }
+            }
+        } else {
+            PathBuf::from(file_path)
+        };
+
+        let img = match image::open(&source_path) {
             Ok(img) => img,
             Err(_) => continue,
         };

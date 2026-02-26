@@ -1579,10 +1579,11 @@ pub async fn get_storage_config(
     pool: &DbPool,
     user_id: i64,
 ) -> Result<Option<RemoteStorageConfig>, AppError> {
-    let row: Option<(String,)> = sqlx::query_as("SELECT config_json FROM storage_configs WHERE user_id = ?")
-        .bind(user_id)
-        .fetch_optional(pool)
-        .await?;
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT config_json FROM storage_configs WHERE user_id = ?")
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await?;
 
     match row {
         Some((json_str,)) => {
