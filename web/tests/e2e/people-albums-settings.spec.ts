@@ -130,6 +130,11 @@ test.describe('People Albums Settings', () => {
     await page.getByRole('button', { name: '存储配置' }).click();
     await expect(page.getByText('S3 兼容存储')).toBeVisible();
     await expect(page.getByRole('heading', { name: 'WebDAV' })).toBeVisible();
+    await page.getByLabel('本地存储路径').fill('/tmp');
+    await page.getByRole('button', { name: '测试本地连接' }).click();
+    await expect(page.getByText('本地存储连接成功')).toBeVisible({ timeout: 10000 });
+    await page.getByRole('button', { name: '保存本地配置' }).click();
+    await expect(page.getByText('存储配置已保存')).toBeVisible({ timeout: 10000 });
 
     await page.getByRole('button', { name: '活动日志' }).click();
     await expect(page.getByRole('heading', { name: '活动日志' })).toBeVisible();

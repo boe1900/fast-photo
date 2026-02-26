@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { type AxiosError } from 'axios';
-import { libraryApi, activityApi } from '../api';
+import { activityApi, libraryApi, storageApi, type StorageConfig } from '../api';
 import { FolderPlus, Trash2, RefreshCw, HardDrive, Clock, Database, Server } from 'lucide-react';
 
 interface Library {
@@ -26,6 +26,22 @@ interface ActivityItem {
     created_at: string;
 }
 
+interface S3FormState {
+    endpoint: string;
+    region: string;
+    bucket: string;
+    access_key: string;
+    secret_key: string;
+    prefix: string;
+}
+
+interface WebDavFormState {
+    url: string;
+    username: string;
+    password: string;
+    prefix: string;
+}
+
 const ACTION_LABELS: Record<string, string> = {
     add_tag: '添加标签',
     remove_tag: '移除标签',
@@ -34,6 +50,7 @@ const ACTION_LABELS: Record<string, string> = {
     restore: '还原照片',
     favorite: '收藏照片',
     login: '登录',
+    register: '注册',
     scan: '扫描图库',
 };
 
@@ -57,6 +74,26 @@ export default function Settings() {
     const [scanProgress, setScanProgress] = useState<ScanProgress | null>(null);
     const [activities, setActivities] = useState<ActivityItem[]>([]);
     const [activeTab, setActiveTab] = useState<'libraries' | 'storage' | 'activity'>('libraries');
+    const [activeStorageType, setActiveStorageType] = useState<'local' | 's3' | 'webdav'>('local');
+    const [localPath, setLocalPath] = useState('');
+    const [s3Form, setS3Form] = useState<S3FormState>({
+        endpoint: '',
+        region: '',
+        bucket: '',
+        access_key: '',
+        secret_key: '',
+        prefix: '',
+    });
+    const [webDavForm, setWebDavForm] = useState<WebDavFormState>({
+        url: '',
+        username: '',
+        password: '',
+        prefix: '',
+    });
+    const [storageLoading, setStorageLoading] = useState(true);
+    const [storageSaving, setStorageSaving] = useState<'local' | 's3' | 'webdav' | null>(null);
+    const [storageTesting, setStorageTesting] = useState<'local' | 's3' | 'webdav' | null>(null);
+    const [storageMessage, setStorageMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
     const loadLibraries = useCallback(async () => {
         try {
@@ -78,10 +115,104 @@ export default function Settings() {
         }
     }, []);
 
+    const applyStorageConfig = useCallback((cfg: StorageConfig) => {
+        setActiveStorageType(cfg.type);
+        if (cfg.type === 'local') {
+            setLocalPath(cfg.path);
+            return;
+        }
+        if (cfg.type === 's3') {
+            setS3Form({
+                endpoint: cfg.endpoint ?? '',
+                region: cfg.region,
+                bucket: cfg.bucket,
+                access_key: cfg.access_key,
+                secret_key: cfg.secret_key,
+                prefix: cfg.prefix ?? '',
+            });
+            return;
+        }
+        setWebDavForm({
+            url: cfg.url,
+            username: cfg.username,
+            password: cfg.password,
+            prefix: cfg.prefix ?? '',
+        });
+    }, []);
+
+    const loadStorageConfig = useCallback(async () => {
+        try {
+            const res = await storageApi.get();
+            applyStorageConfig(res.data);
+        } catch (err) {
+            console.error('Failed to load storage config:', err);
+            setStorageMessage({ type: 'error', text: '存储配置加载失败' });
+        } finally {
+            setStorageLoading(false);
+        }
+    }, [applyStorageConfig]);
+
+    const buildStorageConfig = useCallback((target: 'local' | 's3' | 'webdav'): StorageConfig => {
+        if (target === 'local') {
+            return {
+                type: 'local',
+                path: localPath.trim(),
+            };
+        }
+        if (target === 's3') {
+            return {
+                type: 's3',
+                bucket: s3Form.bucket.trim(),
+                region: s3Form.region.trim(),
+                endpoint: s3Form.endpoint.trim() || null,
+                access_key: s3Form.access_key.trim(),
+                secret_key: s3Form.secret_key.trim(),
+                prefix: s3Form.prefix.trim() || null,
+            };
+        }
+        return {
+            type: 'webdav',
+            url: webDavForm.url.trim(),
+            username: webDavForm.username.trim(),
+            password: webDavForm.password.trim(),
+            prefix: webDavForm.prefix.trim() || null,
+        };
+    }, [localPath, s3Form, webDavForm]);
+
+    const handleTestStorage = useCallback(async (target: 'local' | 's3' | 'webdav') => {
+        setStorageTesting(target);
+        setStorageMessage(null);
+        try {
+            const res = await storageApi.test(buildStorageConfig(target));
+            setStorageMessage({ type: 'success', text: res.data.message || '连接成功' });
+        } catch (err) {
+            const msg = (err as AxiosError<{ error?: string }>).response?.data?.error || '连接测试失败';
+            setStorageMessage({ type: 'error', text: msg });
+        } finally {
+            setStorageTesting(null);
+        }
+    }, [buildStorageConfig]);
+
+    const handleSaveStorage = useCallback(async (target: 'local' | 's3' | 'webdav') => {
+        setStorageSaving(target);
+        setStorageMessage(null);
+        try {
+            const res = await storageApi.save(buildStorageConfig(target));
+            applyStorageConfig(res.data);
+            setStorageMessage({ type: 'success', text: '存储配置已保存' });
+        } catch (err) {
+            const msg = (err as AxiosError<{ error?: string }>).response?.data?.error || '保存失败';
+            setStorageMessage({ type: 'error', text: msg });
+        } finally {
+            setStorageSaving(null);
+        }
+    }, [applyStorageConfig, buildStorageConfig]);
+
     useEffect(() => {
         loadLibraries();
         loadActivity();
-    }, [loadLibraries, loadActivity]);
+        loadStorageConfig();
+    }, [loadLibraries, loadActivity, loadStorageConfig]);
 
     // Poll scan progress
     useEffect(() => {
@@ -250,96 +381,250 @@ export default function Settings() {
                         <p style={{ color: 'var(--text-muted)', fontSize: '13px', marginBottom: '20px' }}>
                             配置外部存储后端。默认使用本地文件系统。
                         </p>
-
-                        <div className="storage-options">
-                            {/* Local storage */}
-                            <div className="storage-card active">
-                                <Database size={20} />
-                                <div style={{ flex: 1 }}>
-                                    <h3>本地存储</h3>
-                                    <p>使用服务器本地文件系统存储照片</p>
-                                </div>
-                                <span className="badge badge-success">当前使用</span>
+                        {storageMessage && (
+                            <div
+                                style={{
+                                    marginBottom: '12px',
+                                    padding: '10px 12px',
+                                    borderRadius: 'var(--radius-sm)',
+                                    fontSize: '13px',
+                                    border: '1px solid var(--border-color)',
+                                    color: storageMessage.type === 'success' ? 'var(--success)' : 'var(--danger)',
+                                }}
+                            >
+                                {storageMessage.text}
                             </div>
+                        )}
 
-                            {/* S3 config */}
-                            <div className="storage-card" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
-                                    <Server size={20} style={{ flexShrink: 0 }} />
-                                    <div style={{ flex: 1 }}>
-                                        <h3>S3 兼容存储</h3>
-                                        <p>Amazon S3、MinIO、Cloudflare R2 等</p>
+                        {storageLoading ? (
+                            <div className="loading-spinner"><div className="spinner" /></div>
+                        ) : (
+                            <div className="storage-options">
+                                {/* Local storage */}
+                                <div
+                                    className={`storage-card ${activeStorageType === 'local' ? 'active' : ''}`}
+                                    style={{ flexDirection: 'column', alignItems: 'stretch' }}
+                                >
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+                                        <Database size={20} style={{ flexShrink: 0 }} />
+                                        <div style={{ flex: 1 }}>
+                                            <h3>本地存储</h3>
+                                            <p>使用服务器本地文件系统存储照片</p>
+                                        </div>
+                                        <span className={`badge ${activeStorageType === 'local' ? 'badge-success' : 'badge-info'}`}>
+                                            {activeStorageType === 'local' ? '当前使用' : '未启用'}
+                                        </span>
                                     </div>
-                                    <span className="badge badge-info">未启用</span>
+                                    <div style={{ marginTop: '14px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                        <div className="form-group" style={{ margin: 0 }}>
+                                            <label style={{ fontSize: '12px' }}>本地存储路径</label>
+                                            <input
+                                                className="form-input"
+                                                placeholder="/data/photos"
+                                                style={{ fontSize: '12px' }}
+                                                aria-label="本地存储路径"
+                                                value={localPath}
+                                                onChange={(e) => setLocalPath(e.target.value)}
+                                            />
+                                        </div>
+                                        <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+                                            <button
+                                                className="btn btn-secondary"
+                                                style={{ fontSize: '12px', padding: '5px 12px' }}
+                                                onClick={() => handleTestStorage('local')}
+                                                disabled={storageTesting !== null || storageSaving !== null}
+                                            >
+                                                {storageTesting === 'local' ? '测试中...' : '测试本地连接'}
+                                            </button>
+                                            <button
+                                                className="btn btn-primary"
+                                                style={{ fontSize: '12px', padding: '5px 12px' }}
+                                                onClick={() => handleSaveStorage('local')}
+                                                disabled={storageTesting !== null || storageSaving !== null}
+                                            >
+                                                {storageSaving === 'local' ? '保存中...' : '保存本地配置'}
+                                            </button>
+                                        </div>
+                                    </div>
                                 </div>
-                                <div style={{ marginTop: '14px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
-                                        <div className="form-group" style={{ margin: 0 }}>
-                                            <label style={{ fontSize: '12px' }}>Endpoint</label>
-                                            <input className="form-input" placeholder="https://s3.amazonaws.com" style={{ fontSize: '12px' }} />
+
+                                {/* S3 config */}
+                                <div className="storage-card" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+                                        <Server size={20} style={{ flexShrink: 0 }} />
+                                        <div style={{ flex: 1 }}>
+                                            <h3>S3 兼容存储</h3>
+                                            <p>Amazon S3、MinIO、Cloudflare R2 等</p>
+                                        </div>
+                                        <span className={`badge ${activeStorageType === 's3' ? 'badge-success' : 'badge-info'}`}>
+                                            {activeStorageType === 's3' ? '当前使用' : '未启用'}
+                                        </span>
+                                    </div>
+                                    <div style={{ marginTop: '14px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                                            <div className="form-group" style={{ margin: 0 }}>
+                                                <label style={{ fontSize: '12px' }}>Endpoint</label>
+                                                <input
+                                                    className="form-input"
+                                                    placeholder="https://s3.amazonaws.com"
+                                                    style={{ fontSize: '12px' }}
+                                                    value={s3Form.endpoint}
+                                                    onChange={(e) => setS3Form((prev) => ({ ...prev, endpoint: e.target.value }))}
+                                                />
+                                            </div>
+                                            <div className="form-group" style={{ margin: 0 }}>
+                                                <label style={{ fontSize: '12px' }}>Region</label>
+                                                <input
+                                                    className="form-input"
+                                                    placeholder="us-east-1"
+                                                    style={{ fontSize: '12px' }}
+                                                    value={s3Form.region}
+                                                    onChange={(e) => setS3Form((prev) => ({ ...prev, region: e.target.value }))}
+                                                />
+                                            </div>
                                         </div>
                                         <div className="form-group" style={{ margin: 0 }}>
-                                            <label style={{ fontSize: '12px' }}>Region</label>
-                                            <input className="form-input" placeholder="us-east-1" style={{ fontSize: '12px' }} />
+                                            <label style={{ fontSize: '12px' }}>Bucket</label>
+                                            <input
+                                                className="form-input"
+                                                placeholder="my-photos-bucket"
+                                                style={{ fontSize: '12px' }}
+                                                value={s3Form.bucket}
+                                                onChange={(e) => setS3Form((prev) => ({ ...prev, bucket: e.target.value }))}
+                                            />
+                                        </div>
+                                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                                            <div className="form-group" style={{ margin: 0 }}>
+                                                <label style={{ fontSize: '12px' }}>Access Key</label>
+                                                <input
+                                                    className="form-input"
+                                                    placeholder="AKIAIOSFODNN7"
+                                                    style={{ fontSize: '12px' }}
+                                                    value={s3Form.access_key}
+                                                    onChange={(e) => setS3Form((prev) => ({ ...prev, access_key: e.target.value }))}
+                                                />
+                                            </div>
+                                            <div className="form-group" style={{ margin: 0 }}>
+                                                <label style={{ fontSize: '12px' }}>Secret Key</label>
+                                                <input
+                                                    className="form-input"
+                                                    type="password"
+                                                    placeholder="••••••••"
+                                                    style={{ fontSize: '12px' }}
+                                                    value={s3Form.secret_key}
+                                                    onChange={(e) => setS3Form((prev) => ({ ...prev, secret_key: e.target.value }))}
+                                                />
+                                            </div>
+                                        </div>
+                                        <div className="form-group" style={{ margin: 0 }}>
+                                            <label style={{ fontSize: '12px' }}>前缀路径（可选）</label>
+                                            <input
+                                                className="form-input"
+                                                placeholder="photos"
+                                                style={{ fontSize: '12px' }}
+                                                value={s3Form.prefix}
+                                                onChange={(e) => setS3Form((prev) => ({ ...prev, prefix: e.target.value }))}
+                                            />
+                                        </div>
+                                        <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+                                            <button
+                                                className="btn btn-secondary"
+                                                style={{ fontSize: '12px', padding: '5px 12px' }}
+                                                onClick={() => handleTestStorage('s3')}
+                                                disabled={storageTesting !== null || storageSaving !== null}
+                                            >
+                                                {storageTesting === 's3' ? '测试中...' : '测试 S3 连接'}
+                                            </button>
+                                            <button
+                                                className="btn btn-primary"
+                                                style={{ fontSize: '12px', padding: '5px 12px' }}
+                                                onClick={() => handleSaveStorage('s3')}
+                                                disabled={storageTesting !== null || storageSaving !== null}
+                                            >
+                                                {storageSaving === 's3' ? '保存中...' : '保存 S3 配置'}
+                                            </button>
                                         </div>
                                     </div>
-                                    <div className="form-group" style={{ margin: 0 }}>
-                                        <label style={{ fontSize: '12px' }}>Bucket</label>
-                                        <input className="form-input" placeholder="my-photos-bucket" style={{ fontSize: '12px' }} />
+                                </div>
+
+                                {/* WebDAV config */}
+                                <div className="storage-card" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+                                        <HardDrive size={20} style={{ flexShrink: 0 }} />
+                                        <div style={{ flex: 1 }}>
+                                            <h3>WebDAV</h3>
+                                            <p>通过 WebDAV 协议连接远程存储</p>
+                                        </div>
+                                        <span className={`badge ${activeStorageType === 'webdav' ? 'badge-success' : 'badge-info'}`}>
+                                            {activeStorageType === 'webdav' ? '当前使用' : '未启用'}
+                                        </span>
                                     </div>
-                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                                    <div style={{ marginTop: '14px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
                                         <div className="form-group" style={{ margin: 0 }}>
-                                            <label style={{ fontSize: '12px' }}>Access Key</label>
-                                            <input className="form-input" placeholder="AKIAIOSFODNN7" style={{ fontSize: '12px' }} />
+                                            <label style={{ fontSize: '12px' }}>WebDAV URL</label>
+                                            <input
+                                                className="form-input"
+                                                placeholder="https://example.com/webdav"
+                                                style={{ fontSize: '12px' }}
+                                                value={webDavForm.url}
+                                                onChange={(e) => setWebDavForm((prev) => ({ ...prev, url: e.target.value }))}
+                                            />
+                                        </div>
+                                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                                            <div className="form-group" style={{ margin: 0 }}>
+                                                <label style={{ fontSize: '12px' }}>用户名</label>
+                                                <input
+                                                    className="form-input"
+                                                    placeholder="admin"
+                                                    style={{ fontSize: '12px' }}
+                                                    value={webDavForm.username}
+                                                    onChange={(e) => setWebDavForm((prev) => ({ ...prev, username: e.target.value }))}
+                                                />
+                                            </div>
+                                            <div className="form-group" style={{ margin: 0 }}>
+                                                <label style={{ fontSize: '12px' }}>密码</label>
+                                                <input
+                                                    className="form-input"
+                                                    type="password"
+                                                    placeholder="••••••••"
+                                                    style={{ fontSize: '12px' }}
+                                                    value={webDavForm.password}
+                                                    onChange={(e) => setWebDavForm((prev) => ({ ...prev, password: e.target.value }))}
+                                                />
+                                            </div>
                                         </div>
                                         <div className="form-group" style={{ margin: 0 }}>
-                                            <label style={{ fontSize: '12px' }}>Secret Key</label>
-                                            <input className="form-input" type="password" placeholder="••••••••" style={{ fontSize: '12px' }} />
+                                            <label style={{ fontSize: '12px' }}>基础路径（可选）</label>
+                                            <input
+                                                className="form-input"
+                                                placeholder="/photos"
+                                                style={{ fontSize: '12px' }}
+                                                value={webDavForm.prefix}
+                                                onChange={(e) => setWebDavForm((prev) => ({ ...prev, prefix: e.target.value }))}
+                                            />
                                         </div>
-                                    </div>
-                                    <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
-                                        <button className="btn btn-secondary" style={{ fontSize: '12px', padding: '5px 12px' }}>测试连接</button>
-                                        <button className="btn btn-primary" style={{ fontSize: '12px', padding: '5px 12px' }}>保存</button>
+                                        <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+                                            <button
+                                                className="btn btn-secondary"
+                                                style={{ fontSize: '12px', padding: '5px 12px' }}
+                                                onClick={() => handleTestStorage('webdav')}
+                                                disabled={storageTesting !== null || storageSaving !== null}
+                                            >
+                                                {storageTesting === 'webdav' ? '测试中...' : '测试 WebDAV 连接'}
+                                            </button>
+                                            <button
+                                                className="btn btn-primary"
+                                                style={{ fontSize: '12px', padding: '5px 12px' }}
+                                                onClick={() => handleSaveStorage('webdav')}
+                                                disabled={storageTesting !== null || storageSaving !== null}
+                                            >
+                                                {storageSaving === 'webdav' ? '保存中...' : '保存 WebDAV 配置'}
+                                            </button>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
-
-                            {/* WebDAV config */}
-                            <div className="storage-card" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
-                                    <HardDrive size={20} style={{ flexShrink: 0 }} />
-                                    <div style={{ flex: 1 }}>
-                                        <h3>WebDAV</h3>
-                                        <p>通过 WebDAV 协议连接远程存储</p>
-                                    </div>
-                                    <span className="badge badge-info">未启用</span>
-                                </div>
-                                <div style={{ marginTop: '14px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                                    <div className="form-group" style={{ margin: 0 }}>
-                                        <label style={{ fontSize: '12px' }}>WebDAV URL</label>
-                                        <input className="form-input" placeholder="https://example.com/webdav" style={{ fontSize: '12px' }} />
-                                    </div>
-                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
-                                        <div className="form-group" style={{ margin: 0 }}>
-                                            <label style={{ fontSize: '12px' }}>用户名</label>
-                                            <input className="form-input" placeholder="admin" style={{ fontSize: '12px' }} />
-                                        </div>
-                                        <div className="form-group" style={{ margin: 0 }}>
-                                            <label style={{ fontSize: '12px' }}>密码</label>
-                                            <input className="form-input" type="password" placeholder="••••••••" style={{ fontSize: '12px' }} />
-                                        </div>
-                                    </div>
-                                    <div className="form-group" style={{ margin: 0 }}>
-                                        <label style={{ fontSize: '12px' }}>基础路径</label>
-                                        <input className="form-input" placeholder="/photos" style={{ fontSize: '12px' }} />
-                                    </div>
-                                    <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
-                                        <button className="btn btn-secondary" style={{ fontSize: '12px', padding: '5px 12px' }}>测试连接</button>
-                                        <button className="btn btn-primary" style={{ fontSize: '12px', padding: '5px 12px' }}>保存</button>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
+                        )}
                     </div>
                 )}
 

@@ -1,6 +1,7 @@
 use fast_photo_core::db;
 use fast_photo_core::dedup;
 use fast_photo_core::models::{CreateLibrary, CreateUser};
+use fast_photo_core::storage::StorageConfig;
 use image::{DynamicImage, GrayImage, Luma};
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -330,4 +331,82 @@ fn dhash_is_stable_and_splits_distinct_patterns() {
     assert_eq!(hash_a1.len(), 16);
     assert_eq!(hash_a1, hash_a2);
     assert_ne!(hash_a1, hash_b);
+}
+
+#[tokio::test]
+async fn storage_config_is_persisted_per_user() {
+    let (db_url, db_path) = temp_db_url();
+    std::fs::File::create(&db_path).expect("create db file");
+    let pool = db::init_pool(&db_url).await.expect("init db");
+
+    let u1 = db::create_user(
+        &pool,
+        &CreateUser {
+            username: "storage_u1".to_string(),
+            password: "ignored".to_string(),
+            role: Some("user".to_string()),
+        },
+        "hash1",
+    )
+    .await
+    .expect("create user1");
+    let u2 = db::create_user(
+        &pool,
+        &CreateUser {
+            username: "storage_u2".to_string(),
+            password: "ignored".to_string(),
+            role: Some("user".to_string()),
+        },
+        "hash2",
+    )
+    .await
+    .expect("create user2");
+
+    let cfg_u1 = StorageConfig::Local {
+        path: "/tmp/fast-photo-storage-u1".to_string(),
+    };
+    let cfg_u2 = StorageConfig::WebDav {
+        url: "https://dav.example.com/webdav".to_string(),
+        username: "alice".to_string(),
+        password: "secret".to_string(),
+        prefix: Some("photos".to_string()),
+    };
+
+    db::upsert_storage_config(&pool, u1.id, &cfg_u1)
+        .await
+        .expect("save u1 config");
+    db::upsert_storage_config(&pool, u2.id, &cfg_u2)
+        .await
+        .expect("save u2 config");
+
+    let got_u1 = db::get_storage_config(&pool, u1.id)
+        .await
+        .expect("read u1 config")
+        .expect("u1 config exists");
+    let got_u2 = db::get_storage_config(&pool, u2.id)
+        .await
+        .expect("read u2 config")
+        .expect("u2 config exists");
+
+    match got_u1 {
+        StorageConfig::Local { path } => assert_eq!(path, "/tmp/fast-photo-storage-u1"),
+        _ => panic!("unexpected u1 storage config"),
+    }
+    match got_u2 {
+        StorageConfig::WebDav {
+            url,
+            username,
+            password,
+            prefix,
+        } => {
+            assert_eq!(url, "https://dav.example.com/webdav");
+            assert_eq!(username, "alice");
+            assert_eq!(password, "secret");
+            assert_eq!(prefix.as_deref(), Some("photos"));
+        }
+        _ => panic!("unexpected u2 storage config"),
+    }
+
+    drop(pool);
+    let _ = std::fs::remove_file(db_path);
 }
