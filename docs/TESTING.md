@@ -26,10 +26,15 @@ cd web && npm run build
 
 # E2E（会自动拉起后端:8080 + 前端:3000）
 cd web && npm run test:e2e
+
+# 远程存储连通性联调（MinIO + WebDAV）
+./scripts/test_storage_backends.sh
 ```
 
 > 首次执行 E2E 可能需要安装浏览器：
 > `cd web && npx playwright install chromium`
+>
+> 执行远程存储联调前需要安装 Docker Engine/Colima + docker compose 插件 + `jq`。
 
 ## 2. 权限隔离测试（重点）
 
@@ -80,4 +85,4 @@ cd web && npm run test:e2e
 1. 存储配置已支持按用户保存与连通性测试；但扫描/上传主流程仍默认本地文件系统，远程存储读写尚未切换到主链路。
 2. 旧历史图片若未重新扫描，可能没有 `phash`，重复检测覆盖不完整。
 3. 当前 E2E 已覆盖登录、核心导航、上传、回收站恢复、分享密码 API、跨用户越权、地图空态、发现页标签/AI 按钮行为、文件夹/收藏/重复页面，以及人物空态、相册创建删除、设置页活动日志与本地存储配置测试。
-4. CI 已配置在 `.github/workflows/ci.yml`，默认执行 `cargo test` + `web build` + `web e2e`。
+4. CI 已配置在 `.github/workflows/ci.yml`，默认执行 `cargo test` + `S3/WebDAV 联调` + `web build` + `web e2e`。

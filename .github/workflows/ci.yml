@@ -33,6 +33,12 @@ jobs:
       - name: Run Rust tests
         run: cargo test
 
+      - name: Install integration test deps
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Run S3/WebDAV integration test
+        run: ./scripts/test_storage_backends.sh
+
       - name: Build web
         working-directory: web
         run: npm run build

@@ -81,6 +81,19 @@ npm run dev
 
 后端默认运行在 `http://localhost:8080`，前端开发服务器在 `http://localhost:3000`。
 
+### 测试命令
+
+```bash
+# 后端测试
+cargo test
+
+# 前端 E2E
+cd web && npm run test:e2e
+
+# S3/WebDAV 连通性联调（会自动拉起 MinIO + WebDAV）
+./scripts/test_storage_backends.sh
+```
+
 ---
 
 ## 📁 项目结构
