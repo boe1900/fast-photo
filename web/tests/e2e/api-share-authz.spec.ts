@@ -301,4 +301,97 @@ test.describe('API Share and AuthZ', () => {
     const sharedAfterRestoreBody = await sharedAfterRestore.json();
     expect(sharedAfterRestoreBody.total).toBe(1);
   });
+
+  test('batch operations only affect caller-owned photos', async ({ request }) => {
+    const userA = await registerUser(request, 'e2e_batch_a');
+    const userB = await registerUser(request, 'e2e_batch_b');
+
+    await createLibrary(request, userA.token, `batch-a-${Date.now()}`);
+    await createLibrary(request, userB.token, `batch-b-${Date.now()}`);
+
+    const aPhotoId = await uploadViaApi(request, userA.token, `batch-a-${Date.now()}.png`);
+    const bPhotoId = await uploadViaApi(request, userB.token, `batch-b-${Date.now()}.png`);
+
+    const aBatchFavorite = await request.post(`${API}/photos/batch/favorite`, {
+      headers: { Authorization: `Bearer ${userA.token}` },
+      data: { photo_ids: [aPhotoId, bPhotoId], favorite: true },
+    });
+    expect(aBatchFavorite.status()).toBe(200);
+    const aBatchFavoriteBody = await aBatchFavorite.json();
+    expect(aBatchFavoriteBody.affected).toBe(1);
+
+    const aFavorites = await request.get(`${API}/photos/favorites`, {
+      headers: { Authorization: `Bearer ${userA.token}` },
+    });
+    expect(aFavorites.status()).toBe(200);
+    const aFavoritesBody = await aFavorites.json();
+    const aFavoriteIds = (aFavoritesBody.data || []).map((p: { id: number }) => p.id);
+    expect(aFavoriteIds).toContain(aPhotoId);
+    expect(aFavoriteIds).not.toContain(bPhotoId);
+
+    const bFavorites = await request.get(`${API}/photos/favorites`, {
+      headers: { Authorization: `Bearer ${userB.token}` },
+    });
+    expect(bFavorites.status()).toBe(200);
+    const bFavoritesBody = await bFavorites.json();
+    const bFavoriteIds = (bFavoritesBody.data || []).map((p: { id: number }) => p.id);
+    expect(bFavoriteIds).not.toContain(bPhotoId);
+
+    const bBatchTrashForeign = await request.post(`${API}/photos/batch/trash`, {
+      headers: { Authorization: `Bearer ${userB.token}` },
+      data: { photo_ids: [aPhotoId] },
+    });
+    expect(bBatchTrashForeign.status()).toBe(200);
+    const bBatchTrashForeignBody = await bBatchTrashForeign.json();
+    expect(bBatchTrashForeignBody.affected).toBe(0);
+
+    const aBatchTrash = await request.post(`${API}/photos/batch/trash`, {
+      headers: { Authorization: `Bearer ${userA.token}` },
+      data: { photo_ids: [aPhotoId, bPhotoId] },
+    });
+    expect(aBatchTrash.status()).toBe(200);
+    const aBatchTrashBody = await aBatchTrash.json();
+    expect(aBatchTrashBody.affected).toBe(1);
+
+    const aTrash = await request.get(`${API}/photos/trash`, {
+      headers: { Authorization: `Bearer ${userA.token}` },
+    });
+    expect(aTrash.status()).toBe(200);
+    const aTrashBody = await aTrash.json();
+    const aTrashIds = (aTrashBody.data || []).map((p: { id: number }) => p.id);
+    expect(aTrashIds).toContain(aPhotoId);
+    expect(aTrashIds).not.toContain(bPhotoId);
+
+    const bTrash = await request.get(`${API}/photos/trash`, {
+      headers: { Authorization: `Bearer ${userB.token}` },
+    });
+    expect(bTrash.status()).toBe(200);
+    const bTrashBody = await bTrash.json();
+    const bTrashIds = (bTrashBody.data || []).map((p: { id: number }) => p.id);
+    expect(bTrashIds).not.toContain(bPhotoId);
+
+    const aBatchRestore = await request.post(`${API}/photos/batch/restore`, {
+      headers: { Authorization: `Bearer ${userA.token}` },
+      data: { photo_ids: [aPhotoId, bPhotoId] },
+    });
+    expect(aBatchRestore.status()).toBe(200);
+    const aBatchRestoreBody = await aBatchRestore.json();
+    expect(aBatchRestoreBody.affected).toBe(1);
+
+    const aTrashAfterRestore = await request.get(`${API}/photos/trash`, {
+      headers: { Authorization: `Bearer ${userA.token}` },
+    });
+    expect(aTrashAfterRestore.status()).toBe(200);
+    const aTrashAfterRestoreBody = await aTrashAfterRestore.json();
+    const aTrashIdsAfterRestore = (aTrashAfterRestoreBody.data || []).map((p: { id: number }) => p.id);
+    expect(aTrashIdsAfterRestore).not.toContain(aPhotoId);
+
+    const aBatchUnfavorite = await request.post(`${API}/photos/batch/favorite`, {
+      headers: { Authorization: `Bearer ${userA.token}` },
+      data: { photo_ids: [aPhotoId, bPhotoId], favorite: false },
+    });
+    expect(aBatchUnfavorite.status()).toBe(200);
+    const aBatchUnfavoriteBody = await aBatchUnfavorite.json();
+    expect(aBatchUnfavoriteBody.affected).toBe(1);
+  });
 });
