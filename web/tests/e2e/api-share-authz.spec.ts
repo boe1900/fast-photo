@@ -162,6 +162,72 @@ test.describe('API Share and AuthZ', () => {
     expect(photos.total).toBe(1);
   });
 
+  test('share password can be cleared to restore public access', async ({ request }) => {
+    const user = await registerUser(request, 'e2e_share_clear');
+    const outsider = await registerUser(request, 'e2e_share_clear_out');
+    await createLibrary(request, user.token, `share-clear-${Date.now()}`);
+    const photoId = await uploadViaApi(request, user.token, `share-clear-${Date.now()}.png`);
+
+    const createAlbumRes = await request.post(`${API}/albums`, {
+      headers: { Authorization: `Bearer ${user.token}` },
+      data: { name: `share-clear-album-${Date.now()}` },
+    });
+    expect(createAlbumRes.status()).toBe(200);
+    const createBody = await createAlbumRes.json();
+    let albumId = createBody.id as number | undefined;
+    let shareToken = createBody.share_token as string | undefined;
+    if (!albumId || !shareToken) {
+      const listRes = await request.get(`${API}/albums`, {
+        headers: { Authorization: `Bearer ${user.token}` },
+      });
+      expect(listRes.status()).toBe(200);
+      const albums = (await listRes.json()) as Array<{ id?: number; share_token?: string }>;
+      albumId = albums[0]?.id;
+      shareToken = albums[0]?.share_token;
+    }
+    expect(albumId).toBeTruthy();
+    expect(shareToken).toBeTruthy();
+
+    const addRes = await request.post(`${API}/albums/${albumId}/photos`, {
+      headers: { Authorization: `Bearer ${user.token}` },
+      data: { photo_ids: [photoId] },
+    });
+    expect(addRes.status()).toBe(200);
+
+    const setPwRes = await request.post(`${API}/albums/${albumId}/share-password`, {
+      headers: { Authorization: `Bearer ${user.token}` },
+      data: { password: 'clear-me' },
+    });
+    expect(setPwRes.status()).toBe(200);
+
+    const privatePhotos = await request.get(`${API}/share/${shareToken}/photos`);
+    expect(privatePhotos.status()).toBe(401);
+
+    const outsiderClearPw = await request.post(`${API}/albums/${albumId}/share-password`, {
+      headers: { Authorization: `Bearer ${outsider.token}` },
+      data: { password: null },
+    });
+    expect(outsiderClearPw.status()).toBe(403);
+
+    const ownerClearPw = await request.post(`${API}/albums/${albumId}/share-password`, {
+      headers: { Authorization: `Bearer ${user.token}` },
+      data: { password: null },
+    });
+    expect(ownerClearPw.status()).toBe(200);
+
+    const publicPhotos = await request.get(`${API}/share/${shareToken}/photos`);
+    expect(publicPhotos.status()).toBe(200);
+    const publicPhotosBody = await publicPhotos.json();
+    expect(publicPhotosBody.total).toBe(1);
+
+    const verifyWithoutPw = await request.post(`${API}/share/${shareToken}/verify`, {
+      data: { password: 'any-value' },
+    });
+    expect(verifyWithoutPw.status()).toBe(200);
+    const verifyWithoutPwBody = await verifyWithoutPw.json();
+    expect(verifyWithoutPwBody.valid).toBe(true);
+  });
+
   test('cross-user photo and album access is forbidden', async ({ request }) => {
     const userA = await registerUser(request, 'e2e_authz_a');
     const userB = await registerUser(request, 'e2e_authz_b');
