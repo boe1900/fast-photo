@@ -441,6 +441,11 @@ async fn empty_trash(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    // Best-effort remove of underlying files after DB rows are deleted.
+    for path in &paths {
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
     let count = paths.len();
     Ok(Json(json!({ "deleted": count })))
 }
