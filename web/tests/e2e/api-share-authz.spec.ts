@@ -75,6 +75,26 @@ async function uploadViaApi(
   return found.id as number;
 }
 
+async function timelinePhotoIds(request: APIRequestContext, token: string): Promise<number[]> {
+  const res = await request.get(`${API}/photos/timeline`, {
+    headers: { Authorization: `Bearer ${token}` },
+    params: { page: 1, per_page: 100 },
+  });
+  expect(res.status()).toBe(200);
+  const body = await res.json();
+  return (body.data || []).map((p: { id: number }) => p.id);
+}
+
+async function trashPhotoIds(request: APIRequestContext, token: string): Promise<number[]> {
+  const res = await request.get(`${API}/photos/trash`, {
+    headers: { Authorization: `Bearer ${token}` },
+    params: { page: 1, per_page: 100 },
+  });
+  expect(res.status()).toBe(200);
+  const body = await res.json();
+  return (body.data || []).map((p: { id: number }) => p.id);
+}
+
 test.describe('API Share and AuthZ', () => {
   test('share password flow works on public endpoints', async ({ request }) => {
     const user = await registerUser(request, 'e2e_share');
@@ -393,5 +413,67 @@ test.describe('API Share and AuthZ', () => {
     expect(aBatchUnfavorite.status()).toBe(200);
     const aBatchUnfavoriteBody = await aBatchUnfavorite.json();
     expect(aBatchUnfavoriteBody.affected).toBe(1);
+  });
+
+  test('empty trash and permanent delete preserve authz and user data boundaries', async ({
+    request,
+  }) => {
+    const userA = await registerUser(request, 'e2e_empty_perm_a');
+    const userB = await registerUser(request, 'e2e_empty_perm_b');
+
+    await createLibrary(request, userA.token, `empty-perm-a-${Date.now()}`);
+    await createLibrary(request, userB.token, `empty-perm-b-${Date.now()}`);
+
+    const aTrashedPhotoId = await uploadViaApi(request, userA.token, `a-trashed-${Date.now()}.png`);
+    const aActivePhotoId = await uploadViaApi(request, userA.token, `a-active-${Date.now()}.png`);
+    const bTrashedPhotoId = await uploadViaApi(request, userB.token, `b-trashed-${Date.now()}.png`);
+
+    const trashA = await request.post(`${API}/photos/${aTrashedPhotoId}/trash`, {
+      headers: { Authorization: `Bearer ${userA.token}` },
+    });
+    expect(trashA.status()).toBe(200);
+
+    const trashB = await request.post(`${API}/photos/${bTrashedPhotoId}/trash`, {
+      headers: { Authorization: `Bearer ${userB.token}` },
+    });
+    expect(trashB.status()).toBe(200);
+
+    const beforeATrash = await trashPhotoIds(request, userA.token);
+    const beforeBTrash = await trashPhotoIds(request, userB.token);
+    expect(beforeATrash).toContain(aTrashedPhotoId);
+    expect(beforeBTrash).toContain(bTrashedPhotoId);
+
+    const emptyATrash = await request.post(`${API}/photos/trash/empty`, {
+      headers: { Authorization: `Bearer ${userA.token}` },
+    });
+    expect(emptyATrash.status()).toBe(200);
+    const emptyATrashBody = await emptyATrash.json();
+    expect(emptyATrashBody.deleted).toBe(1);
+
+    const afterATrash = await trashPhotoIds(request, userA.token);
+    const afterBTrash = await trashPhotoIds(request, userB.token);
+    expect(afterATrash).not.toContain(aTrashedPhotoId);
+    expect(afterBTrash).toContain(bTrashedPhotoId);
+
+    const bDeleteA = await request.delete(`${API}/photos/${aActivePhotoId}/permanent`, {
+      headers: { Authorization: `Bearer ${userB.token}` },
+    });
+    expect(bDeleteA.status()).toBe(403);
+
+    const aDeleteA = await request.delete(`${API}/photos/${aActivePhotoId}/permanent`, {
+      headers: { Authorization: `Bearer ${userA.token}` },
+    });
+    expect(aDeleteA.status()).toBe(200);
+
+    const aTimelineAfterDelete = await timelinePhotoIds(request, userA.token);
+    const bTimelineAfterDelete = await timelinePhotoIds(request, userB.token);
+    expect(aTimelineAfterDelete).not.toContain(aActivePhotoId);
+    expect(bTimelineAfterDelete).not.toContain(aActivePhotoId);
+    expect(bTimelineAfterDelete).not.toContain(aTrashedPhotoId);
+
+    const repeatDelete = await request.delete(`${API}/photos/${aActivePhotoId}/permanent`, {
+      headers: { Authorization: `Bearer ${userA.token}` },
+    });
+    expect([403, 404]).toContain(repeatDelete.status());
   });
 });
