@@ -476,4 +476,82 @@ test.describe('API Share and AuthZ', () => {
     });
     expect([403, 404]).toContain(repeatDelete.status());
   });
+
+  test('share token becomes invalid after album deletion', async ({ request }) => {
+    const owner = await registerUser(request, 'e2e_share_delete_owner');
+    const outsider = await registerUser(request, 'e2e_share_delete_outsider');
+
+    await createLibrary(request, owner.token, `share-delete-${Date.now()}`);
+    const photoId = await uploadViaApi(request, owner.token, `share-delete-${Date.now()}.png`);
+
+    const createAlbumRes = await request.post(`${API}/albums`, {
+      headers: { Authorization: `Bearer ${owner.token}` },
+      data: { name: `share-delete-album-${Date.now()}` },
+    });
+    expect(createAlbumRes.status()).toBe(200);
+    const createBody = await createAlbumRes.json();
+    let albumId = createBody.id as number | undefined;
+    let shareToken = createBody.share_token as string | undefined;
+    if (!albumId || !shareToken) {
+      const listRes = await request.get(`${API}/albums`, {
+        headers: { Authorization: `Bearer ${owner.token}` },
+      });
+      expect(listRes.status()).toBe(200);
+      const albums = (await listRes.json()) as Array<{ id?: number; share_token?: string }>;
+      albumId = albums[0]?.id;
+      shareToken = albums[0]?.share_token;
+    }
+    expect(albumId).toBeTruthy();
+    expect(shareToken).toBeTruthy();
+
+    const addRes = await request.post(`${API}/albums/${albumId}/photos`, {
+      headers: { Authorization: `Bearer ${owner.token}` },
+      data: { photo_ids: [photoId] },
+    });
+    expect(addRes.status()).toBe(200);
+
+    const setPwRes = await request.post(`${API}/albums/${albumId}/share-password`, {
+      headers: { Authorization: `Bearer ${owner.token}` },
+      data: { password: 'to-delete-secret' },
+    });
+    expect(setPwRes.status()).toBe(200);
+
+    const shareInfoBeforeDelete = await request.get(`${API}/share/${shareToken}`);
+    expect(shareInfoBeforeDelete.status()).toBe(200);
+
+    const sharePhotosBeforeDelete = await request.get(`${API}/share/${shareToken}/photos`, {
+      headers: { 'x-share-password': 'to-delete-secret' },
+    });
+    expect(sharePhotosBeforeDelete.status()).toBe(200);
+    const sharePhotosBeforeDeleteBody = await sharePhotosBeforeDelete.json();
+    expect(sharePhotosBeforeDeleteBody.total).toBe(1);
+
+    const outsiderDeleteAlbum = await request.delete(`${API}/albums/${albumId}`, {
+      headers: { Authorization: `Bearer ${outsider.token}` },
+    });
+    expect(outsiderDeleteAlbum.status()).toBe(403);
+
+    const ownerDeleteAlbum = await request.delete(`${API}/albums/${albumId}`, {
+      headers: { Authorization: `Bearer ${owner.token}` },
+    });
+    expect(ownerDeleteAlbum.status()).toBe(204);
+
+    const ownerGetDeletedAlbum = await request.get(`${API}/albums/${albumId}`, {
+      headers: { Authorization: `Bearer ${owner.token}` },
+    });
+    expect(ownerGetDeletedAlbum.status()).toBe(404);
+
+    const shareInfoAfterDelete = await request.get(`${API}/share/${shareToken}`);
+    expect(shareInfoAfterDelete.status()).toBe(404);
+
+    const sharePhotosAfterDelete = await request.get(`${API}/share/${shareToken}/photos`, {
+      headers: { 'x-share-password': 'to-delete-secret' },
+    });
+    expect(sharePhotosAfterDelete.status()).toBe(404);
+
+    const verifyAfterDelete = await request.post(`${API}/share/${shareToken}/verify`, {
+      data: { password: 'to-delete-secret' },
+    });
+    expect(verifyAfterDelete.status()).toBe(404);
+  });
 });
