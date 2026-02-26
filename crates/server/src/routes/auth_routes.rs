@@ -13,9 +13,13 @@ use fast_photo_core::models::{CreateUser, LoginRequest, LoginResponse, UserInfo}
 use crate::auth::{create_token, AuthUser};
 use crate::state::AppState;
 
-const LOGIN_LIMIT_WINDOW: Duration = Duration::from_secs(300);
-const LOGIN_MAX_FAILURES: usize = 10;
+const DEFAULT_LOGIN_LIMIT_WINDOW_SECS: u64 = 300;
+const DEFAULT_LOGIN_MAX_FAILURES: usize = 10;
+const LOGIN_LIMIT_WINDOW_ENV: &str = "FASTPHOTO_LOGIN_LIMIT_WINDOW_SECS";
+const LOGIN_MAX_FAILURES_ENV: &str = "FASTPHOTO_LOGIN_MAX_FAILURES";
 static LOGIN_FAILURES: OnceLock<Mutex<HashMap<String, Vec<Instant>>>> = OnceLock::new();
+static LOGIN_LIMIT_WINDOW_OVERRIDE: OnceLock<Duration> = OnceLock::new();
+static LOGIN_MAX_FAILURES_OVERRIDE: OnceLock<usize> = OnceLock::new();
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -225,11 +229,32 @@ fn login_failures() -> &'static Mutex<HashMap<String, Vec<Instant>>> {
     LOGIN_FAILURES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn login_limit_window() -> Duration {
+    *LOGIN_LIMIT_WINDOW_OVERRIDE.get_or_init(|| {
+        let seconds = std::env::var(LOGIN_LIMIT_WINDOW_ENV)
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(DEFAULT_LOGIN_LIMIT_WINDOW_SECS);
+        Duration::from_secs(seconds)
+    })
+}
+
+fn login_max_failures() -> usize {
+    *LOGIN_MAX_FAILURES_OVERRIDE.get_or_init(|| {
+        std::env::var(LOGIN_MAX_FAILURES_ENV)
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(DEFAULT_LOGIN_MAX_FAILURES)
+    })
+}
+
 fn is_login_rate_limited(key: &str) -> bool {
     let mut store = login_failures().lock().expect("login failure mutex poisoned");
     let attempts = store.entry(key.to_string()).or_default();
     prune_old_attempts(attempts);
-    attempts.len() >= LOGIN_MAX_FAILURES
+    attempts.len() >= login_max_failures()
 }
 
 fn record_login_failure(key: &str) {
@@ -246,7 +271,7 @@ fn clear_login_failures(key: &str) {
 
 fn prune_old_attempts(attempts: &mut Vec<Instant>) {
     let now = Instant::now();
-    attempts.retain(|at| now.duration_since(*at) < LOGIN_LIMIT_WINDOW);
+    attempts.retain(|at| now.duration_since(*at) < login_limit_window());
 }
 
 #[cfg(test)]
@@ -256,8 +281,9 @@ mod tests {
     #[test]
     fn prune_old_attempts_keeps_recent_entries_only() {
         let now = Instant::now();
+        let window = login_limit_window();
         let mut attempts = vec![
-            now - (LOGIN_LIMIT_WINDOW + Duration::from_secs(1)),
+            now - (window + Duration::from_secs(1)),
             now - Duration::from_secs(1),
         ];
         prune_old_attempts(&mut attempts);
@@ -269,7 +295,7 @@ mod tests {
         let key = format!("test-user-{}", std::process::id());
         clear_login_failures(&key);
 
-        for _ in 0..LOGIN_MAX_FAILURES {
+        for _ in 0..login_max_failures() {
             record_login_failure(&key);
         }
         assert!(is_login_rate_limited(&key));
