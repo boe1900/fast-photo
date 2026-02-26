@@ -49,4 +49,4 @@ jobs:
 
       - name: Run E2E tests
         working-directory: web
-        run: npm run test:e2e
+        run: FASTPHOTO_ENABLE_STORAGE_UI_E2E=1 npm run test:e2e

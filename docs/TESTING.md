@@ -27,6 +27,9 @@ cd web && npm run build
 # E2E（会自动拉起后端:8080 + 前端:3000）
 cd web && npm run test:e2e
 
+# E2E（包含 S3/WebDAV 设置页联调 UI）
+cd web && FASTPHOTO_ENABLE_STORAGE_UI_E2E=1 npm run test:e2e
+
 # 远程存储连通性联调（MinIO + WebDAV）
 ./scripts/test_storage_backends.sh
 ```

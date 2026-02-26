@@ -92,6 +92,9 @@ cd web && npm run test:e2e
 
 # S3/WebDAV 连通性联调（会自动拉起 MinIO + WebDAV）
 ./scripts/test_storage_backends.sh
+
+# 设置页远程存储 UI 联调 E2E（S3/WebDAV）
+cd web && FASTPHOTO_ENABLE_STORAGE_UI_E2E=1 npm run test:e2e
 ```
 
 ---
