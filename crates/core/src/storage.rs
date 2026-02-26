@@ -139,6 +139,12 @@ impl S3Storage {
             s3::creds::Credentials::new(Some(access_key), Some(secret_key), None, None, None)?;
 
         let bucket = s3::Bucket::new(bucket_name, region, credentials)?;
+        let bucket = if endpoint.is_some() {
+            // Custom endpoints (MinIO/Ceph, etc.) typically require path-style addressing.
+            bucket.with_path_style()
+        } else {
+            bucket
+        };
 
         let cache_dir = cache_dir.into();
         std::fs::create_dir_all(&cache_dir)?;
@@ -163,9 +169,14 @@ impl S3Storage {
 impl StorageBackend for S3Storage {
     async fn list_files(&self, dir: &str) -> Result<Vec<String>> {
         let key = self.full_key(dir);
+        let prefix = if key.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", key.trim_matches('/'))
+        };
         let results = self
             .bucket
-            .list(format!("{}/", key), Some("/".to_string()))
+            .list(prefix, Some("/".to_string()))
             .await?;
 
         let mut files = Vec::new();
@@ -284,6 +295,9 @@ impl StorageBackend for WebDavStorage {
             .body(r#"<?xml version="1.0" encoding="utf-8"?><propfind xmlns="DAV:"><prop><displayname/></prop></propfind>"#)
             .send()
             .await?;
+        if !response.status().is_success() {
+            anyhow::bail!("WebDAV PROPFIND failed: {}", response.status());
+        }
 
         let body = response.text().await?;
 
