@@ -1,12 +1,18 @@
+mod alerts;
 mod auth;
+mod observability;
 mod routes;
 mod state;
 
-use axum::Router;
+use axum::middleware;
+use axum::routing::get;
+use axum::{Json, Router};
+use chrono::Utc;
 use fast_photo_ai::AiState;
 use fast_photo_common::AppConfig;
 use fast_photo_core::db;
 use fast_photo_core::models::ScanProgress;
+use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -69,7 +75,11 @@ async fn main() -> anyhow::Result<()> {
         scan_progress: scan_rx,
         scan_tx: Arc::new(scan_tx),
         ai: ai_state,
+        alerts: Arc::new(alerts::AlertSink::new(
+            config.storage.data_dir.join("alerts.ndjson"),
+        )),
     };
+    tracing::info!("Alert file: {:?}", state.alerts.output_path());
 
     // Build CORS layer
     let cors = CorsLayer::new()
@@ -79,7 +89,12 @@ async fn main() -> anyhow::Result<()> {
 
     // Build the router
     let app = Router::new()
+        .route("/healthz", get(healthz))
         .nest("/api", routes::api_routes())
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            observability::track_requests,
+        ))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state);
@@ -92,4 +107,11 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+async fn healthz() -> Json<Value> {
+    Json(json!({
+        "status": "ok",
+        "timestamp": Utc::now(),
+    }))
 }

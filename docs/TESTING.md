@@ -13,6 +13,7 @@
 6. 收藏/取消收藏正常，收藏页可同步。
 7. 删除到回收站、从回收站还原、永久删除均可执行。
 8. 全量 `cargo test` 与前端 `npm run build` 通过。
+9. `GET /healthz` 返回 `status=ok`；任意 API 响应头包含 `x-request-id`。
 
 ### 自动化命令
 

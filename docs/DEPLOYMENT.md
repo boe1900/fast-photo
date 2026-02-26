@@ -34,6 +34,12 @@ cd web && npm ci && npm run build
 
 前端静态文件可由 Nginx 等服务托管，API 反向代理到后端 `/api`。
 
+启动后健康检查：
+
+```bash
+curl -s http://127.0.0.1:8080/healthz
+```
+
 ## 4. 升级
 
 1. 拉取新代码。
@@ -47,3 +53,14 @@ cd web && npm ci && npm run build
 1. 停服务。
 2. 恢复数据库：`./scripts/restore_db.sh <backup-file>`
 3. 切回上个可用版本并重启。
+
+## 6. 可观测性（最小集）
+
+- 健康检查端点：`/healthz`
+- 每个响应返回 `x-request-id`，用于串联日志排障
+- 5xx 会写入告警文件：`data/alerts.ndjson`
+- 实时查看告警：
+
+```bash
+./scripts/tail_alerts.sh
+```

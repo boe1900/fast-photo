@@ -49,6 +49,12 @@ crates/
 web/          # React 前端
 ```
 
+### 运行与可观测性
+
+- 健康检查：`GET /healthz`
+- 请求追踪：所有响应附带 `x-request-id`
+- 最小告警出口：HTTP 5xx 事件写入 `data/alerts.ndjson`
+
 ### 启动方式
 
 ```bash
