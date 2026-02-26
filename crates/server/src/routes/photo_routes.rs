@@ -8,17 +8,43 @@ use serde_json::{json, Value};
 use tokio_util::io::ReaderStream;
 
 use fast_photo_core::db;
+use fast_photo_core::dedup;
 use fast_photo_core::models::PaginationParams;
+use fast_photo_core::scanner;
 use fast_photo_core::thumbnailer::{self, ThumbnailSize};
 
 use crate::auth::AuthUser;
 use crate::state::AppState;
+
+async fn user_library_ids(state: &AppState, user_id: i64) -> Result<Vec<i64>, StatusCode> {
+    let libs = db::get_libraries(&state.db, user_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(libs.iter().map(|l| l.id).collect())
+}
+
+async fn ensure_photo_access(
+    state: &AppState,
+    user_id: i64,
+    photo_id: i64,
+) -> Result<(), StatusCode> {
+    let lib_ids = user_library_ids(state, user_id).await?;
+    let allowed = db::photo_in_libraries(&state.db, photo_id, &lib_ids)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if allowed {
+        Ok(())
+    } else {
+        Err(StatusCode::FORBIDDEN)
+    }
+}
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/timeline", get(timeline))
         .route("/folders", get(folders))
         .route("/folder-contents", get(folder_contents))
+        .route("/folders/contents", get(folder_contents))
         .route("/search", get(search))
         .route("/geo", get(geo_photos))
         .route("/favorites", get(favorites))
@@ -29,14 +55,14 @@ pub fn routes() -> Router<AppState> {
         .route("/batch/favorite", post(batch_favorite))
         .route("/batch/trash", post(batch_trash))
         .route("/batch/restore", post(batch_restore))
-        .route("/{id}", get(photo_detail))
-        .route("/{id}/thumbnail/{size}", get(thumbnail))
-        .route("/{id}/original", get(original))
-        .route("/{id}/live-video", get(live_video))
-        .route("/{id}/favorite", post(toggle_favorite))
-        .route("/{id}/trash", post(trash_photo))
-        .route("/{id}/restore", post(restore_photo))
-        .route("/{id}/permanent", delete(permanent_delete))
+        .route("/:id", get(photo_detail))
+        .route("/:id/thumbnail/:size", get(thumbnail))
+        .route("/:id/original", get(original))
+        .route("/:id/live-video", get(live_video))
+        .route("/:id/favorite", post(toggle_favorite))
+        .route("/:id/trash", post(trash_photo))
+        .route("/:id/restore", post(restore_photo))
+        .route("/:id/permanent", delete(permanent_delete))
 }
 
 #[derive(Debug, Deserialize)]
@@ -51,10 +77,7 @@ async fn timeline(
     State(state): State<AppState>,
     Query(query): Query<TimelineQuery>,
 ) -> Result<Json<Value>, StatusCode> {
-    let libs = db::get_libraries(&state.db, auth.user_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let lib_ids: Vec<i64> = libs.iter().map(|l| l.id).collect();
+    let lib_ids = user_library_ids(&state, auth.user_id).await?;
 
     let (photos, total) = db::get_photos_by_timeline(
         &state.db,
@@ -75,10 +98,7 @@ async fn timeline(
 
 /// Get folder structure
 async fn folders(auth: AuthUser, State(state): State<AppState>) -> Result<Json<Value>, StatusCode> {
-    let libs = db::get_libraries(&state.db, auth.user_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let lib_ids: Vec<i64> = libs.iter().map(|l| l.id).collect();
+    let lib_ids = user_library_ids(&state, auth.user_id).await?;
 
     let folder_tree = db::get_folder_tree(&state.db, &lib_ids)
         .await
@@ -96,12 +116,14 @@ struct FolderQuery {
 
 /// Get photos in a specific folder
 async fn folder_contents(
-    _auth: AuthUser,
+    auth: AuthUser,
     State(state): State<AppState>,
     Query(query): Query<FolderQuery>,
 ) -> Result<Json<Value>, StatusCode> {
+    let lib_ids = user_library_ids(&state, auth.user_id).await?;
     let (photos, total) = db::get_photos_by_folder(
         &state.db,
+        &lib_ids,
         &query.path,
         query.pagination.offset(),
         query.pagination.per_page(),
@@ -130,10 +152,7 @@ async fn search(
     State(state): State<AppState>,
     Query(query): Query<SearchQuery>,
 ) -> Result<Json<Value>, StatusCode> {
-    let libs = db::get_libraries(&state.db, auth.user_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let lib_ids: Vec<i64> = libs.iter().map(|l| l.id).collect();
+    let lib_ids = user_library_ids(&state, auth.user_id).await?;
 
     let (photos, total) = db::search_photos(
         &state.db,
@@ -155,10 +174,11 @@ async fn search(
 
 /// Get photo detail
 async fn photo_detail(
-    _auth: AuthUser,
+    auth: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Json<Value>, StatusCode> {
+    ensure_photo_access(&state, auth.user_id, id).await?;
     let photo = db::get_photo_by_id(&state.db, id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -174,10 +194,11 @@ async fn photo_detail(
 
 /// Serve thumbnail
 async fn thumbnail(
-    _auth: AuthUser,
+    auth: AuthUser,
     State(state): State<AppState>,
     Path((id, size)): Path<(i64, String)>,
 ) -> Result<(StatusCode, [(header::HeaderName, String); 2], Body), StatusCode> {
+    ensure_photo_access(&state, auth.user_id, id).await?;
     let thumb_size = match size.as_str() {
         "small" => ThumbnailSize::Small,
         "medium" => ThumbnailSize::Medium,
@@ -232,10 +253,11 @@ async fn thumbnail(
 
 /// Serve original photo
 async fn original(
-    _auth: AuthUser,
+    auth: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<(StatusCode, [(header::HeaderName, String); 2], Body), StatusCode> {
+    ensure_photo_access(&state, auth.user_id, id).await?;
     let photo = db::get_photo_by_id(&state.db, id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -263,10 +285,7 @@ async fn geo_photos(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<Value>, StatusCode> {
-    let libs = db::get_libraries(&state.db, auth.user_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let lib_ids: Vec<i64> = libs.iter().map(|l| l.id).collect();
+    let lib_ids = user_library_ids(&state, auth.user_id).await?;
 
     let photos = db::get_geo_photos(&state.db, &lib_ids)
         .await
@@ -277,10 +296,11 @@ async fn geo_photos(
 
 /// Serve Live Photo video
 async fn live_video(
-    _auth: AuthUser,
+    auth: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<(StatusCode, [(header::HeaderName, String); 3], Body), StatusCode> {
+    ensure_photo_access(&state, auth.user_id, id).await?;
     let photo = db::get_photo_by_id(&state.db, id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -316,10 +336,11 @@ async fn live_video(
 // ─── Favorites ─────────────────────────────────
 
 async fn toggle_favorite(
-    _auth: AuthUser,
+    auth: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Json<Value>, StatusCode> {
+    ensure_photo_access(&state, auth.user_id, id).await?;
     let is_fav = db::toggle_favorite(&state.db, id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -331,10 +352,7 @@ async fn favorites(
     State(state): State<AppState>,
     Query(params): Query<PaginationParams>,
 ) -> Result<Json<Value>, StatusCode> {
-    let libs = db::get_libraries(&state.db, auth.user_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let lib_ids: Vec<i64> = libs.iter().map(|l| l.id).collect();
+    let lib_ids = user_library_ids(&state, auth.user_id).await?;
     let page = params.page.unwrap_or(1);
     let per_page = params.per_page.unwrap_or(50);
     let offset = ((page - 1) * per_page) as i64;
@@ -354,10 +372,11 @@ async fn favorites(
 // ─── Trash ─────────────────────────────────────
 
 async fn trash_photo(
-    _auth: AuthUser,
+    auth: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, StatusCode> {
+    ensure_photo_access(&state, auth.user_id, id).await?;
     db::trash_photo(&state.db, id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -365,10 +384,11 @@ async fn trash_photo(
 }
 
 async fn restore_photo(
-    _auth: AuthUser,
+    auth: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, StatusCode> {
+    ensure_photo_access(&state, auth.user_id, id).await?;
     db::restore_photo(&state.db, id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -376,10 +396,11 @@ async fn restore_photo(
 }
 
 async fn permanent_delete(
-    _auth: AuthUser,
+    auth: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, StatusCode> {
+    ensure_photo_access(&state, auth.user_id, id).await?;
     let file_path = db::permanent_delete(&state.db, id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -393,10 +414,7 @@ async fn trash_list(
     State(state): State<AppState>,
     Query(params): Query<PaginationParams>,
 ) -> Result<Json<Value>, StatusCode> {
-    let libs = db::get_libraries(&state.db, auth.user_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let lib_ids: Vec<i64> = libs.iter().map(|l| l.id).collect();
+    let lib_ids = user_library_ids(&state, auth.user_id).await?;
     let page = params.page.unwrap_or(1);
     let per_page = params.per_page.unwrap_or(50);
     let offset = ((page - 1) * per_page) as i64;
@@ -417,10 +435,7 @@ async fn empty_trash(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<Value>, StatusCode> {
-    let libs = db::get_libraries(&state.db, auth.user_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let lib_ids: Vec<i64> = libs.iter().map(|l| l.id).collect();
+    let lib_ids = user_library_ids(&state, auth.user_id).await?;
 
     let paths = db::empty_trash(&state.db, &lib_ids)
         .await
@@ -444,33 +459,48 @@ struct BatchFavoriteRequest {
 }
 
 async fn batch_favorite(
-    _auth: AuthUser,
+    auth: AuthUser,
     State(state): State<AppState>,
     Json(body): Json<BatchFavoriteRequest>,
 ) -> Result<Json<Value>, StatusCode> {
-    let affected = db::set_favorite_batch(&state.db, &body.photo_ids, body.favorite)
+    let lib_ids = user_library_ids(&state, auth.user_id).await?;
+    let allowed_ids = db::filter_photo_ids_in_libraries(&state.db, &body.photo_ids, &lib_ids)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let affected = db::set_favorite_batch(&state.db, &allowed_ids, body.favorite)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(json!({ "affected": affected })))
 }
 
 async fn batch_trash(
-    _auth: AuthUser,
+    auth: AuthUser,
     State(state): State<AppState>,
     Json(body): Json<BatchRequest>,
 ) -> Result<Json<Value>, StatusCode> {
-    let affected = db::trash_batch(&state.db, &body.photo_ids)
+    let lib_ids = user_library_ids(&state, auth.user_id).await?;
+    let allowed_ids = db::filter_photo_ids_in_libraries(&state.db, &body.photo_ids, &lib_ids)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let affected = db::trash_batch(&state.db, &allowed_ids)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(json!({ "affected": affected })))
 }
 
 async fn batch_restore(
-    _auth: AuthUser,
+    auth: AuthUser,
     State(state): State<AppState>,
     Json(body): Json<BatchRequest>,
 ) -> Result<Json<Value>, StatusCode> {
-    let affected = db::restore_batch(&state.db, &body.photo_ids)
+    let lib_ids = user_library_ids(&state, auth.user_id).await?;
+    let allowed_ids = db::filter_photo_ids_in_libraries(&state.db, &body.photo_ids, &lib_ids)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let affected = db::restore_batch(&state.db, &allowed_ids)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(json!({ "affected": affected })))
@@ -503,14 +533,36 @@ async fn upload_photo(
         .await
         .map_err(|_| StatusCode::BAD_REQUEST)?
     {
-        let file_name = field.file_name().unwrap_or("unknown").to_string();
+        let original_file_name = field.file_name().unwrap_or("unknown").to_string();
         let content_type = field
             .content_type()
             .unwrap_or("application/octet-stream")
             .to_string();
         let data = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
 
-        let dest_path = upload_dir.join(&file_name);
+        // Keep existing files and choose an available filename suffix.
+        let mut file_name = original_file_name.clone();
+        let mut dest_path = upload_dir.join(&file_name);
+        let mut counter = 1u32;
+        while tokio::fs::try_exists(&dest_path)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        {
+            let path = std::path::Path::new(&original_file_name);
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("upload");
+            let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+            file_name = if ext.is_empty() {
+                format!("{} ({})", stem, counter)
+            } else {
+                format!("{} ({}).{}", stem, counter, ext)
+            };
+            dest_path = upload_dir.join(&file_name);
+            counter += 1;
+        }
+
         tokio::fs::write(&dest_path, &data)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -534,6 +586,12 @@ async fn upload_photo(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+        let guessed_mime = scanner::mime_type_from_extension(&dest_path);
+        if content_type.starts_with("image/") || guessed_mime.starts_with("image/") {
+            let phash = dedup::compute_dhash(&dest_path).unwrap_or_else(|_| hash.clone());
+            let _ = db::update_phash(&state.db, photo_id, &phash).await;
+        }
+
         uploaded.push(json!({ "id": photo_id, "file_name": file_name }));
     }
 
@@ -546,10 +604,7 @@ async fn duplicates(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<Value>, StatusCode> {
-    let libs = db::get_libraries(&state.db, auth.user_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let lib_ids: Vec<i64> = libs.iter().map(|l| l.id).collect();
+    let lib_ids = user_library_ids(&state, auth.user_id).await?;
 
     let groups = db::find_duplicates(&state.db, &lib_ids)
         .await

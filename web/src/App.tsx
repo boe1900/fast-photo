@@ -1,5 +1,5 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import Login from './pages/Login';
 import Layout from './components/Layout';
 import Timeline from './pages/Timeline';
@@ -21,20 +21,22 @@ interface User {
   role: string;
 }
 
-function App() {
-  const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
+function getStoredUser(): User | null {
+  const token = localStorage.getItem('token');
+  const saved = localStorage.getItem('user');
+  if (!token || !saved) {
+    return null;
+  }
 
-  useEffect(() => {
-    const token = localStorage.getItem('token');
-    const saved = localStorage.getItem('user');
-    if (token && saved) {
-      try {
-        setUser(JSON.parse(saved));
-      } catch { /* ignore */ }
-    }
-    setLoading(false);
-  }, []);
+  try {
+    return JSON.parse(saved) as User;
+  } catch {
+    return null;
+  }
+}
+
+function App() {
+  const [user, setUser] = useState<User | null>(() => getStoredUser());
 
   const handleLogin = (u: User, token: string) => {
     localStorage.setItem('token', token);
@@ -47,14 +49,6 @@ function App() {
     localStorage.removeItem('user');
     setUser(null);
   };
-
-  if (loading) {
-    return (
-      <div className="loading-spinner">
-        <div className="spinner" />
-      </div>
-    );
-  }
 
   return (
     <BrowserRouter>

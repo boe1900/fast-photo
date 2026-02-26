@@ -3,10 +3,9 @@ use axum::http::StatusCode;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
-use std::sync::Arc;
 
-use fast_photo_core::{db, scanner};
 use fast_photo_core::models::CreateLibrary;
+use fast_photo_core::{db, scanner};
 
 use crate::auth::AuthUser;
 use crate::state::AppState;
@@ -14,8 +13,8 @@ use crate::state::AppState;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/", get(list_libraries).post(create_library))
-        .route("/{id}", delete(delete_library))
-        .route("/{id}/scan", post(scan_library))
+        .route("/:id", delete(delete_library))
+        .route("/:id/scan", post(scan_library))
         .route("/scan-progress", get(scan_progress))
 }
 
@@ -46,7 +45,12 @@ async fn create_library(
 
     let lib = db::create_library(&state.db, &body, auth.user_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        })?;
 
     Ok((StatusCode::CREATED, Json(json!(lib))))
 }
@@ -59,16 +63,32 @@ async fn delete_library(
 ) -> Result<StatusCode, (StatusCode, Json<Value>)> {
     let lib = db::get_library_by_id(&state.db, id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?
-        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "Library not found"}))))?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "Library not found"})),
+            )
+        })?;
 
     if lib.user_id != auth.user_id && auth.role != "admin" {
-        return Err((StatusCode::FORBIDDEN, Json(json!({"error": "No permission"}))));
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "No permission"})),
+        ));
     }
 
-    db::delete_library(&state.db, id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?;
+    db::delete_library(&state.db, id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+    })?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -81,11 +101,24 @@ async fn scan_library(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let lib = db::get_library_by_id(&state.db, id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))))?
-        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "Library not found"}))))?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "Library not found"})),
+            )
+        })?;
 
     if lib.user_id != auth.user_id && auth.role != "admin" {
-        return Err((StatusCode::FORBIDDEN, Json(json!({"error": "No permission"}))));
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "No permission"})),
+        ));
     }
 
     let pool = state.db.clone();
@@ -108,10 +141,16 @@ async fn scan_library(
         }
     });
 
-    Ok(Json(json!({"status": "scanning", "message": "Scan started"})))
+    Ok(Json(
+        json!({"status": "scanning", "message": "Scan started"}),
+    ))
 }
 
-async fn generate_thumbnails_for_library(pool: &db::DbPool, library_id: i64, thumb_dir: &std::path::Path) {
+async fn generate_thumbnails_for_library(
+    pool: &db::DbPool,
+    library_id: i64,
+    thumb_dir: &std::path::Path,
+) {
     use fast_photo_core::thumbnailer;
 
     let result = db::get_photos_by_timeline(pool, &[library_id], 0, 100000).await;
@@ -140,10 +179,7 @@ async fn generate_thumbnails_for_library(pool: &db::DbPool, library_id: i64, thu
 }
 
 /// Get current scan progress
-async fn scan_progress(
-    _auth: AuthUser,
-    State(state): State<AppState>,
-) -> Json<Value> {
+async fn scan_progress(_auth: AuthUser, State(state): State<AppState>) -> Json<Value> {
     let progress = state.scan_progress.borrow().clone();
     Json(json!(progress))
 }

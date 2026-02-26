@@ -14,17 +14,32 @@ use fast_photo_core::models::PaginationParams;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/", get(list_albums).post(create_album))
-        .route("/{id}", get(get_album).delete(delete_album_handler))
-        .route("/{id}/photos", get(album_photos).post(add_to_album))
-        .route("/{id}/photos/{photo_id}", delete(remove_from_album))
-        .route("/{id}/share-password", post(set_share_password))
+        .route("/:id", get(get_album).delete(delete_album_handler))
+        .route("/:id/photos", get(album_photos).post(add_to_album))
+        .route("/:id/photos/:photo_id", delete(remove_from_album))
+        .route("/:id/share-password", post(set_share_password))
 }
 
 pub fn share_routes() -> Router<AppState> {
     Router::new()
-        .route("/{token}", get(shared_album))
-        .route("/{token}/photos", get(shared_album_photos))
-        .route("/{token}/verify", post(verify_share_password))
+        .route("/:token", get(shared_album))
+        .route("/:token/photos", get(shared_album_photos))
+        .route("/:token/verify", post(verify_share_password))
+}
+
+async fn ensure_album_owner(
+    state: &AppState,
+    auth: &AuthUser,
+    album_id: i64,
+) -> Result<fast_photo_core::models::Album, StatusCode> {
+    let album = db::get_album_by_id(&state.db, album_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    if album.user_id != auth.user_id && auth.role != "admin" {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(album)
 }
 
 async fn list_albums(
@@ -54,22 +69,20 @@ async fn create_album(
 }
 
 async fn get_album(
-    _auth: AuthUser,
+    auth: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Json<Value>, StatusCode> {
-    let album = db::get_album_by_id(&state.db, id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let album = ensure_album_owner(&state, &auth, id).await?;
     Ok(Json(json!(album)))
 }
 
 async fn delete_album_handler(
-    _auth: AuthUser,
+    auth: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, StatusCode> {
+    ensure_album_owner(&state, &auth, id).await?;
     db::delete_album(&state.db, id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -77,11 +90,12 @@ async fn delete_album_handler(
 }
 
 async fn album_photos(
-    _auth: AuthUser,
+    auth: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<i64>,
     Query(pagination): Query<PaginationParams>,
 ) -> Result<Json<Value>, StatusCode> {
+    ensure_album_owner(&state, &auth, id).await?;
     let (photos, total) =
         db::get_album_photos(&state.db, id, pagination.offset(), pagination.per_page())
             .await
@@ -98,22 +112,36 @@ struct AddPhotosReq {
 }
 
 async fn add_to_album(
-    _auth: AuthUser,
+    auth: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<i64>,
     Json(body): Json<AddPhotosReq>,
 ) -> Result<StatusCode, StatusCode> {
-    db::add_photos_to_album(&state.db, id, &body.photo_ids)
+    ensure_album_owner(&state, &auth, id).await?;
+
+    let libs = db::get_libraries(&state.db, auth.user_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let lib_ids: Vec<i64> = libs.iter().map(|l| l.id).collect();
+    let allowed_ids = db::filter_photo_ids_in_libraries(&state.db, &body.photo_ids, &lib_ids)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if allowed_ids.len() != body.photo_ids.len() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    db::add_photos_to_album(&state.db, id, &allowed_ids)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(StatusCode::OK)
 }
 
 async fn remove_from_album(
-    _auth: AuthUser,
+    auth: AuthUser,
     State(state): State<AppState>,
     Path((album_id, photo_id)): Path<(i64, i64)>,
 ) -> Result<StatusCode, StatusCode> {
+    ensure_album_owner(&state, &auth, album_id).await?;
     db::remove_photo_from_album(&state.db, album_id, photo_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -126,11 +154,12 @@ struct SharePasswordReq {
 }
 
 async fn set_share_password(
-    _auth: AuthUser,
+    auth: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<i64>,
     Json(body): Json<SharePasswordReq>,
 ) -> Result<Json<Value>, StatusCode> {
+    ensure_album_owner(&state, &auth, id).await?;
     db::set_share_password(&state.db, id, body.password.as_deref())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

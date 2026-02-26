@@ -57,6 +57,22 @@ export default function PhotoViewer({ photo, onClose }: PhotoViewerProps) {
         tagApi.photoTags(photo.id).then((res) => setTags(res.data.tags || []));
     }, [photo.id]);
 
+    const startLivePlayback = () => {
+        setIsPlayingLive(true);
+        if (videoRef.current) {
+            videoRef.current.currentTime = 0;
+            videoRef.current.play().catch(() => { });
+        }
+    };
+
+    const stopLivePlayback = () => {
+        setIsPlayingLive(false);
+        if (videoRef.current) {
+            videoRef.current.pause();
+            videoRef.current.currentTime = 0;
+        }
+    };
+
     useEffect(() => {
         const handleKey = (e: KeyboardEvent) => {
             if (e.key === 'Escape') onClose();
@@ -78,22 +94,6 @@ export default function PhotoViewer({ photo, onClose }: PhotoViewerProps) {
             window.removeEventListener('keyup', handleKeyUp);
         };
     }, [onClose, isLivePhoto, isPlayingLive]);
-
-    const startLivePlayback = () => {
-        setIsPlayingLive(true);
-        if (videoRef.current) {
-            videoRef.current.currentTime = 0;
-            videoRef.current.play().catch(() => { });
-        }
-    };
-
-    const stopLivePlayback = () => {
-        setIsPlayingLive(false);
-        if (videoRef.current) {
-            videoRef.current.pause();
-            videoRef.current.currentTime = 0;
-        }
-    };
 
     const formatFileSize = (bytes: number) => {
         if (bytes < 1024) return `${bytes} B`;

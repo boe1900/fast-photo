@@ -14,9 +14,28 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/tags", get(list_tags))
         .route("/tags/photos", get(photos_by_tag))
-        .route("/photos/{id}/tags", get(photo_tags))
-        .route("/photos/{id}/tags", post(add_tag))
-        .route("/photos/{id}/tags/{tag_id}", delete(remove_tag))
+        .route("/photos/:id/tags", get(photo_tags))
+        .route("/photos/:id/tags", post(add_tag))
+        .route("/photos/:id/tags/:tag_id", delete(remove_tag))
+}
+
+async fn ensure_photo_access(
+    state: &AppState,
+    auth: &AuthUser,
+    photo_id: i64,
+) -> Result<(), StatusCode> {
+    let libs = db::get_libraries(&state.db, auth.user_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let lib_ids: Vec<i64> = libs.iter().map(|l| l.id).collect();
+    let allowed = db::photo_in_libraries(&state.db, photo_id, &lib_ids)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if allowed {
+        Ok(())
+    } else {
+        Err(StatusCode::FORBIDDEN)
+    }
 }
 
 async fn list_tags(
@@ -30,10 +49,11 @@ async fn list_tags(
 }
 
 async fn photo_tags(
-    _auth: AuthUser,
+    auth: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Json<Value>, StatusCode> {
+    ensure_photo_access(&state, &auth, id).await?;
     let tags = db::get_photo_tags(&state.db, id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -57,6 +77,7 @@ async fn add_tag(
     Path(id): Path<i64>,
     Json(body): Json<AddTagRequest>,
 ) -> Result<Json<Value>, StatusCode> {
+    ensure_photo_access(&state, &auth, id).await?;
     let tag_id = db::get_or_create_tag(&state.db, &body.name, &body.category)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -78,6 +99,7 @@ async fn remove_tag(
     State(state): State<AppState>,
     Path((id, tag_id)): Path<(i64, i64)>,
 ) -> Result<StatusCode, StatusCode> {
+    ensure_photo_access(&state, &auth, id).await?;
     db::remove_tag_from_photo(&state.db, id, tag_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -94,7 +116,15 @@ async fn remove_tag(
 #[derive(Deserialize)]
 struct TagSearchParams {
     tag: String,
+    #[serde(
+        default,
+        deserialize_with = "fast_photo_core::models::deserialize_opt_u32_from_string"
+    )]
     page: Option<u32>,
+    #[serde(
+        default,
+        deserialize_with = "fast_photo_core::models::deserialize_opt_u32_from_string"
+    )]
     per_page: Option<u32>,
 }
 

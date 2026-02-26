@@ -14,11 +14,26 @@ use crate::state::AppState;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/persons", get(list_persons))
-        .route("/persons/{id}", put(rename_person))
-        .route("/persons/{id}/photos", get(person_photos))
+        .route("/persons/:id", put(rename_person))
+        .route("/persons/:id/photos", get(person_photos))
         .route("/faces/scan", post(scan_faces))
         .route("/faces/cluster", post(cluster_faces))
-        .route("/faces/{id}/thumbnail", get(face_thumbnail))
+        .route("/faces/:id/thumbnail", get(face_thumbnail))
+}
+
+async fn ensure_person_access(
+    state: &AppState,
+    auth: &AuthUser,
+    person_id: i64,
+) -> Result<(), StatusCode> {
+    let person = db::get_person_by_id(&state.db, person_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    if person.user_id != auth.user_id && auth.role != "admin" {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -56,11 +71,12 @@ struct RenameRequest {
 }
 
 async fn rename_person(
-    _auth: AuthUser,
+    auth: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<i64>,
     Json(body): Json<RenameRequest>,
 ) -> Result<StatusCode, StatusCode> {
+    ensure_person_access(&state, &auth, id).await?;
     db::rename_person(&state.db, id, &body.name)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -68,10 +84,11 @@ async fn rename_person(
 }
 
 async fn person_photos(
-    _auth: AuthUser,
+    auth: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    ensure_person_access(&state, &auth, id).await?;
     let (photos, total) = db::get_person_photos(&state.db, id, 200, 0)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -83,10 +100,21 @@ async fn person_photos(
 }
 
 async fn face_thumbnail(
-    _auth: AuthUser,
+    auth: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<(StatusCode, [(header::HeaderName, String); 2], Vec<u8>), StatusCode> {
+    let libs = db::get_libraries(&state.db, auth.user_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let lib_ids: Vec<i64> = libs.iter().map(|l| l.id).collect();
+    let allowed = db::face_in_libraries(&state.db, id, &lib_ids)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if !allowed {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
     let data = db::get_face_thumbnail(&state.db, id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -107,7 +135,7 @@ async fn face_thumbnail(
 
 /// Scan all photos for faces (background task)
 async fn scan_faces(
-    _auth: AuthUser,
+    auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let ai = state.ai.face.read().await;
@@ -116,13 +144,31 @@ async fn scan_faces(
         None => return Err(StatusCode::SERVICE_UNAVAILABLE),
     };
 
-    // Get all photos that haven't been face-processed
-    let photos = sqlx::query_as::<_, (i64, String, String)>(
-        "SELECT id, file_path, mime_type FROM photos WHERE mime_type LIKE 'image/%'",
-    )
-    .fetch_all(&*state.db)
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // Scan only photos in current user's libraries
+    let libs = db::get_libraries(&state.db, auth.user_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let lib_ids: Vec<i64> = libs.iter().map(|l| l.id).collect();
+    if lib_ids.is_empty() {
+        return Ok(Json(serde_json::json!({
+            "processed": 0,
+            "faces_found": 0,
+        })));
+    }
+
+    let placeholders: Vec<String> = lib_ids.iter().map(|_| "?".to_string()).collect();
+    let query = format!(
+        "SELECT id, file_path, mime_type FROM photos WHERE mime_type LIKE 'image/%' AND deleted_at IS NULL AND library_id IN ({})",
+        placeholders.join(",")
+    );
+    let mut q = sqlx::query_as::<_, (i64, String, String)>(&query);
+    for id in &lib_ids {
+        q = q.bind(id);
+    }
+    let photos = q
+        .fetch_all(&*state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut processed = 0u64;
     let mut faces_found = 0u64;
@@ -211,7 +257,15 @@ async fn cluster_faces(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let all_faces = db::get_all_face_embeddings(&state.db)
+    let libs = db::get_libraries(&state.db, auth.user_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let lib_ids: Vec<i64> = libs.iter().map(|l| l.id).collect();
+    if lib_ids.is_empty() {
+        return Ok(Json(serde_json::json!({ "persons_created": 0 })));
+    }
+
+    let all_faces = db::get_face_embeddings_by_libraries(&state.db, &lib_ids)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 

@@ -1,5 +1,5 @@
 use chrono::NaiveDateTime;
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Deserializer, Serialize};
 
 // ─── User ──────────────────────────────────────────────
 
@@ -178,7 +178,9 @@ pub struct Face {
 
 #[derive(Debug, Deserialize)]
 pub struct PaginationParams {
+    #[serde(default, deserialize_with = "deserialize_opt_u32_from_string")]
     pub page: Option<u32>,
+    #[serde(default, deserialize_with = "deserialize_opt_u32_from_string")]
     pub per_page: Option<u32>,
 }
 
@@ -228,4 +230,23 @@ pub struct ScanProgress {
     pub total_files: u64,
     pub processed_files: u64,
     pub status: String,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum U32OrString {
+    U32(u32),
+    String(String),
+}
+
+pub fn deserialize_opt_u32_from_string<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<U32OrString>::deserialize(deserializer)?;
+    match value {
+        None => Ok(None),
+        Some(U32OrString::U32(v)) => Ok(Some(v)),
+        Some(U32OrString::String(s)) => s.parse::<u32>().map(Some).map_err(de::Error::custom),
+    }
 }

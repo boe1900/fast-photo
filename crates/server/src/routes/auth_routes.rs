@@ -37,20 +37,29 @@ async fn register(
     if body.username.trim().is_empty() || body.password.len() < 6 {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(json!({"error": "Username cannot be empty, password must be at least 6 characters"})),
+            Json(
+                json!({"error": "Username cannot be empty, password must be at least 6 characters"}),
+            ),
         ));
     }
 
-    let user_count = db::get_user_count(&state.db)
-        .await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "Database error"}))))?;
+    let user_count = db::get_user_count(&state.db).await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "Database error"})),
+        )
+    })?;
 
     // First user is admin, rest need to be created by admin
     let role = if user_count == 0 { "admin" } else { "user" };
 
     // Hash password
-    let hashed = hash_password(&body.password)
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "Failed to hash password"}))))?;
+    let hashed = hash_password(&body.password).map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "Failed to hash password"})),
+        )
+    })?;
 
     let user = db::create_user(
         &state.db,
@@ -62,7 +71,12 @@ async fn register(
         &hashed,
     )
     .await
-    .map_err(|_| (StatusCode::CONFLICT, Json(json!({"error": "Username already exists"}))))?;
+    .map_err(|_| {
+        (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "Username already exists"})),
+        )
+    })?;
 
     let token = create_token(
         user.id,
@@ -71,7 +85,12 @@ async fn register(
         &state.config.auth.jwt_secret,
         state.config.auth.token_expiry_hours,
     )
-    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "Failed to create token"}))))?;
+    .map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "Failed to create token"})),
+        )
+    })?;
 
     Ok((
         StatusCode::CREATED,
@@ -93,15 +112,32 @@ async fn login(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let user = db::get_user_by_username(&state.db, &body.username)
         .await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "Database error"}))))?
-        .ok_or_else(|| (StatusCode::UNAUTHORIZED, Json(json!({"error": "Invalid credentials"}))))?;
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "Database error"})),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "Invalid credentials"})),
+            )
+        })?;
 
     // Verify password
-    let valid = verify_password(&body.password, &user.password)
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "Password verification error"}))))?;
+    let valid = verify_password(&body.password, &user.password).map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "Password verification error"})),
+        )
+    })?;
 
     if !valid {
-        return Err((StatusCode::UNAUTHORIZED, Json(json!({"error": "Invalid credentials"}))));
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "Invalid credentials"})),
+        ));
     }
 
     let token = create_token(
@@ -111,7 +147,12 @@ async fn login(
         &state.config.auth.jwt_secret,
         state.config.auth.token_expiry_hours,
     )
-    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "Failed to create token"}))))?;
+    .map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "Failed to create token"})),
+        )
+    })?;
 
     Ok(Json(json!(LoginResponse {
         token,
@@ -133,8 +174,8 @@ async fn me(auth: AuthUser) -> Json<Value> {
 }
 
 fn hash_password(password: &str) -> anyhow::Result<String> {
-    use argon2::{password_hash::SaltString, Argon2, PasswordHasher};
     use argon2::password_hash::rand_core::OsRng;
+    use argon2::{password_hash::SaltString, Argon2, PasswordHasher};
 
     let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default();
@@ -147,8 +188,8 @@ fn hash_password(password: &str) -> anyhow::Result<String> {
 fn verify_password(password: &str, hash: &str) -> anyhow::Result<bool> {
     use argon2::{Argon2, PasswordHash, PasswordVerifier};
 
-    let parsed_hash = PasswordHash::new(hash)
-        .map_err(|e| anyhow::anyhow!("Hash parse error: {}", e))?;
+    let parsed_hash =
+        PasswordHash::new(hash).map_err(|e| anyhow::anyhow!("Hash parse error: {}", e))?;
     Ok(Argon2::default()
         .verify_password(password.as_bytes(), &parsed_hash)
         .is_ok())

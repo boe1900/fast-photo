@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { type AxiosError } from 'axios';
 import { libraryApi, activityApi } from '../api';
 import { FolderPlus, Trash2, RefreshCw, HardDrive, Clock, Database, Server } from 'lucide-react';
 
@@ -108,8 +109,8 @@ export default function Settings() {
             setNewName('');
             setNewPath('');
             loadLibraries();
-        } catch (err: any) {
-            setAddError(err.response?.data?.error || '创建失败');
+        } catch (err) {
+            setAddError((err as AxiosError<{ error?: string }>).response?.data?.error || '创建失败');
         }
     };
 

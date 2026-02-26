@@ -15,17 +15,22 @@ use crate::state::AppState;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/tags", get(list_tags))
-        .route("/tags/{id}/photos", get(photos_by_tag))
+        .route("/tags/:id/photos", get(photos_by_tag))
         .route("/semantic-search", get(semantic_search))
         .route("/process", post(process_ai))
 }
 
 /// List all tags with photo counts
 async fn list_tags(
-    _auth: AuthUser,
+    auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<Value>, StatusCode> {
-    let tags = db::get_tags_with_counts(&state.db)
+    let libs = db::get_libraries(&state.db, auth.user_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let lib_ids: Vec<i64> = libs.iter().map(|l| l.id).collect();
+
+    let tags = db::get_tags_with_counts_in_libraries(&state.db, &lib_ids)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -48,14 +53,20 @@ async fn list_tags(
 
 /// Get photos by tag
 async fn photos_by_tag(
-    _auth: AuthUser,
+    auth: AuthUser,
     State(state): State<AppState>,
     Path(tag_id): Path<i64>,
     Query(pagination): Query<PaginationParams>,
 ) -> Result<Json<Value>, StatusCode> {
-    let (photos, total) = db::get_photos_by_tag(
+    let libs = db::get_libraries(&state.db, auth.user_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let lib_ids: Vec<i64> = libs.iter().map(|l| l.id).collect();
+
+    let (photos, total) = db::get_photos_by_tag_in_libraries(
         &state.db,
         tag_id,
+        &lib_ids,
         pagination.offset(),
         pagination.per_page(),
     )
@@ -73,6 +84,10 @@ async fn photos_by_tag(
 #[derive(Debug, Deserialize)]
 struct SemanticSearchQuery {
     q: String,
+    #[serde(
+        default,
+        deserialize_with = "fast_photo_core::models::deserialize_opt_u32_from_string"
+    )]
     limit: Option<u32>,
 }
 

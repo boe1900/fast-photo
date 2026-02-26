@@ -1,8 +1,8 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { photoApi } from '../api';
 import PhotoViewer from '../components/PhotoViewer';
 import { Sparkles, Search as SearchIcon, Tag, Loader } from 'lucide-react';
-import axios from 'axios';
+import axios, { type AxiosError } from 'axios';
 
 interface Photo {
     id: number;
@@ -39,28 +39,28 @@ export default function Explore() {
     const [loading, setLoading] = useState(true);
 
     const token = localStorage.getItem('token');
-    const headers = { Authorization: `Bearer ${token}` };
-
-    useEffect(() => {
-        loadTags();
-    }, []);
-
-    const loadTags = async () => {
+    const loadTags = useCallback(async () => {
         try {
-            const res = await axios.get('/api/ai/tags', { headers });
+            const res = await axios.get('/api/ai/tags', {
+                headers: { Authorization: `Bearer ${token}` },
+            });
             setTags(res.data);
         } catch (err) {
             console.error('Failed to load tags:', err);
         } finally {
             setLoading(false);
         }
-    };
+    }, [token]);
+
+    useEffect(() => {
+        loadTags();
+    }, [loadTags]);
 
     const selectTag = async (tag: TagInfo) => {
         setSelectedTag(tag);
         try {
             const res = await axios.get(`/api/ai/tags/${tag.id}/photos`, {
-                headers,
+                headers: { Authorization: `Bearer ${token}` },
                 params: { per_page: 100 },
             });
             setTagPhotos(res.data.data);
@@ -77,12 +77,12 @@ export default function Explore() {
         setSelectedTag(null);
         try {
             const res = await axios.get('/api/ai/semantic-search', {
-                headers,
+                headers: { Authorization: `Bearer ${token}` },
                 params: { q: semanticQuery, limit: 50 },
             });
             setSemanticResults(res.data.data);
-        } catch (err: any) {
-            const msg = err.response?.data?.error || '搜索失败';
+        } catch (err) {
+            const msg = (err as AxiosError<{ error?: string }>).response?.data?.error || '搜索失败';
             alert(msg);
         } finally {
             setSearching(false);
@@ -92,10 +92,12 @@ export default function Explore() {
     const triggerAiProcessing = async () => {
         setProcessing(true);
         try {
-            await axios.post('/api/ai/process', null, { headers });
+            await axios.post('/api/ai/process', null, {
+                headers: { Authorization: `Bearer ${token}` },
+            });
             alert('AI 处理已在后台开始，处理完成后刷新页面查看结果');
-        } catch (err: any) {
-            alert(err.response?.data?.error || 'AI 处理失败');
+        } catch (err) {
+            alert((err as AxiosError<{ error?: string }>).response?.data?.error || 'AI 处理失败');
         } finally {
             setProcessing(false);
         }

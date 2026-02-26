@@ -34,6 +34,8 @@ async fn run_migrations(pool: &DbPool) -> anyhow::Result<()> {
         "ALTER TABLE photos ADD COLUMN is_favorite BOOLEAN NOT NULL DEFAULT 0",
         "ALTER TABLE photos ADD COLUMN deleted_at DATETIME",
         "ALTER TABLE photos ADD COLUMN phash TEXT",
+        "ALTER TABLE photos ADD COLUMN live_photo_video_path TEXT",
+        "ALTER TABLE photos ADD COLUMN duration REAL",
         "ALTER TABLE albums ADD COLUMN share_password TEXT",
     ];
     for sql in alter_migrations {
@@ -356,31 +358,97 @@ pub async fn get_photos_by_timeline(
 
 pub async fn get_photos_by_folder(
     pool: &DbPool,
+    library_ids: &[i64],
     folder_path: &str,
     offset: u32,
     limit: u32,
 ) -> Result<(Vec<Photo>, i64), AppError> {
+    if library_ids.is_empty() {
+        return Ok((vec![], 0));
+    }
+
+    let placeholders: Vec<String> = library_ids.iter().map(|_| "?".to_string()).collect();
+    let in_clause = placeholders.join(",");
     let pattern = format!("{}/%", folder_path);
 
-    let (total,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM photos WHERE file_path LIKE ? AND file_path NOT LIKE ? AND deleted_at IS NULL",
-    )
-    .bind(&pattern)
-    .bind(&format!("{}/%/%", folder_path))
-    .fetch_one(pool)
-    .await?;
+    let count_query = format!(
+        "SELECT COUNT(*) FROM photos WHERE library_id IN ({}) AND file_path LIKE ? AND file_path NOT LIKE ? AND deleted_at IS NULL",
+        in_clause
+    );
+    let mut cq = sqlx::query_as::<_, (i64,)>(&count_query);
+    for id in library_ids {
+        cq = cq.bind(id);
+    }
+    cq = cq.bind(&pattern).bind(format!("{}/%/%", folder_path));
+    let (total,) = cq.fetch_one(pool).await?;
 
-    let photos = sqlx::query_as::<_, Photo>(
-        "SELECT * FROM photos WHERE file_path LIKE ? AND file_path NOT LIKE ? AND deleted_at IS NULL ORDER BY file_name LIMIT ? OFFSET ?"
-    )
+    let data_query = format!(
+        "SELECT * FROM photos WHERE library_id IN ({}) AND file_path LIKE ? AND file_path NOT LIKE ? AND deleted_at IS NULL ORDER BY file_name LIMIT ? OFFSET ?",
+        in_clause
+    );
+    let mut dq = sqlx::query_as::<_, Photo>(&data_query);
+    for id in library_ids {
+        dq = dq.bind(id);
+    }
+    dq = dq
         .bind(&pattern)
-        .bind(&format!("{}/%/%", folder_path))
+        .bind(format!("{}/%/%", folder_path))
         .bind(limit)
-        .bind(offset)
-        .fetch_all(pool)
-        .await?;
+        .bind(offset);
+    let photos = dq.fetch_all(pool).await?;
 
     Ok((photos, total))
+}
+
+pub async fn photo_in_libraries(
+    pool: &DbPool,
+    photo_id: i64,
+    library_ids: &[i64],
+) -> Result<bool, AppError> {
+    if library_ids.is_empty() {
+        return Ok(false);
+    }
+    let placeholders: Vec<String> = library_ids.iter().map(|_| "?".to_string()).collect();
+    let in_clause = placeholders.join(",");
+    let query = format!(
+        "SELECT COUNT(*) FROM photos WHERE id = ? AND library_id IN ({})",
+        in_clause
+    );
+    let mut q = sqlx::query_as::<_, (i64,)>(&query).bind(photo_id);
+    for id in library_ids {
+        q = q.bind(id);
+    }
+    let (count,) = q.fetch_one(pool).await?;
+    Ok(count > 0)
+}
+
+pub async fn filter_photo_ids_in_libraries(
+    pool: &DbPool,
+    photo_ids: &[i64],
+    library_ids: &[i64],
+) -> Result<Vec<i64>, AppError> {
+    if photo_ids.is_empty() || library_ids.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let photo_placeholders: Vec<String> = photo_ids.iter().map(|_| "?".to_string()).collect();
+    let library_placeholders: Vec<String> = library_ids.iter().map(|_| "?".to_string()).collect();
+    let query = format!(
+        "SELECT id FROM photos WHERE id IN ({}) AND library_id IN ({})",
+        photo_placeholders.join(","),
+        library_placeholders.join(",")
+    );
+
+    let mut q = sqlx::query_as::<_, (i64,)>(&query);
+    for id in photo_ids {
+        q = q.bind(id);
+    }
+    for id in library_ids {
+        q = q.bind(id);
+    }
+
+    let rows = q.fetch_all(pool).await?;
+    Ok(rows.into_iter().map(|r| r.0).collect())
 }
 
 pub async fn get_photo_by_id(pool: &DbPool, id: i64) -> Result<Option<Photo>, AppError> {
@@ -838,6 +906,33 @@ pub async fn get_tags_with_counts(pool: &DbPool) -> Result<Vec<TagWithCount>, Ap
     Ok(tags)
 }
 
+pub async fn get_tags_with_counts_in_libraries(
+    pool: &DbPool,
+    library_ids: &[i64],
+) -> Result<Vec<TagWithCount>, AppError> {
+    if library_ids.is_empty() {
+        return Ok(vec![]);
+    }
+    let placeholders: Vec<String> = library_ids.iter().map(|_| "?".to_string()).collect();
+    let in_clause = placeholders.join(",");
+    let query = format!(
+        "SELECT t.id, t.name, t.category, COUNT(pt.photo_id) as photo_count
+         FROM tags t
+         INNER JOIN photo_tags pt ON t.id = pt.tag_id
+         INNER JOIN photos p ON p.id = pt.photo_id
+         WHERE p.library_id IN ({}) AND p.deleted_at IS NULL
+         GROUP BY t.id
+         ORDER BY photo_count DESC",
+        in_clause
+    );
+    let mut q = sqlx::query_as::<_, TagWithCount>(&query);
+    for id in library_ids {
+        q = q.bind(id);
+    }
+    let tags = q.fetch_all(pool).await?;
+    Ok(tags)
+}
+
 pub async fn get_photos_by_tag(
     pool: &DbPool,
     tag_id: i64,
@@ -861,6 +956,49 @@ pub async fn get_photos_by_tag(
     .bind(offset)
     .fetch_all(pool)
     .await?;
+
+    Ok((photos, total))
+}
+
+pub async fn get_photos_by_tag_in_libraries(
+    pool: &DbPool,
+    tag_id: i64,
+    library_ids: &[i64],
+    offset: u32,
+    limit: u32,
+) -> Result<(Vec<Photo>, i64), AppError> {
+    if library_ids.is_empty() {
+        return Ok((vec![], 0));
+    }
+    let placeholders: Vec<String> = library_ids.iter().map(|_| "?".to_string()).collect();
+    let in_clause = placeholders.join(",");
+
+    let count_query = format!(
+        "SELECT COUNT(*) FROM photo_tags pt
+         INNER JOIN photos p ON p.id = pt.photo_id
+         WHERE pt.tag_id = ? AND p.library_id IN ({}) AND p.deleted_at IS NULL",
+        in_clause
+    );
+    let mut cq = sqlx::query_as::<_, (i64,)>(&count_query).bind(tag_id);
+    for id in library_ids {
+        cq = cq.bind(id);
+    }
+    let (total,) = cq.fetch_one(pool).await?;
+
+    let data_query = format!(
+        "SELECT p.* FROM photos p
+         INNER JOIN photo_tags pt ON p.id = pt.photo_id
+         WHERE pt.tag_id = ? AND p.library_id IN ({}) AND p.deleted_at IS NULL
+         ORDER BY pt.confidence DESC
+         LIMIT ? OFFSET ?",
+        in_clause
+    );
+    let mut dq = sqlx::query_as::<_, Photo>(&data_query).bind(tag_id);
+    for id in library_ids {
+        dq = dq.bind(id);
+    }
+    dq = dq.bind(limit).bind(offset);
+    let photos = dq.fetch_all(pool).await?;
 
     Ok((photos, total))
 }
@@ -908,6 +1046,30 @@ pub async fn get_all_face_embeddings(pool: &DbPool) -> Result<Vec<(i64, Vec<u8>)
     Ok(rows)
 }
 
+pub async fn get_face_embeddings_by_libraries(
+    pool: &DbPool,
+    library_ids: &[i64],
+) -> Result<Vec<(i64, Vec<u8>)>, AppError> {
+    if library_ids.is_empty() {
+        return Ok(vec![]);
+    }
+    let placeholders: Vec<String> = library_ids.iter().map(|_| "?".to_string()).collect();
+    let in_clause = placeholders.join(",");
+    let query = format!(
+        "SELECT f.id, f.embedding
+         FROM faces f
+         INNER JOIN photos p ON p.id = f.photo_id
+         WHERE f.embedding IS NOT NULL AND p.library_id IN ({})",
+        in_clause
+    );
+    let mut q = sqlx::query_as::<_, (i64, Vec<u8>)>(&query);
+    for id in library_ids {
+        q = q.bind(id);
+    }
+    let rows = q.fetch_all(pool).await?;
+    Ok(rows)
+}
+
 pub async fn create_person(pool: &DbPool, user_id: i64) -> Result<i64, AppError> {
     let result = sqlx::query("INSERT INTO persons (user_id) VALUES (?)")
         .bind(user_id)
@@ -924,6 +1086,14 @@ pub async fn list_persons(pool: &DbPool, user_id: i64) -> Result<Vec<Person>, Ap
     .fetch_all(pool)
     .await?;
     Ok(persons)
+}
+
+pub async fn get_person_by_id(pool: &DbPool, person_id: i64) -> Result<Option<Person>, AppError> {
+    let person = sqlx::query_as::<_, Person>("SELECT * FROM persons WHERE id = ?")
+        .bind(person_id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(person)
 }
 
 pub async fn rename_person(pool: &DbPool, person_id: i64, name: &str) -> Result<(), AppError> {
@@ -992,6 +1162,29 @@ pub async fn get_face_thumbnail(pool: &DbPool, face_id: i64) -> Result<Option<Ve
         .fetch_optional(pool)
         .await?;
     Ok(row.and_then(|r| r.0))
+}
+
+pub async fn face_in_libraries(
+    pool: &DbPool,
+    face_id: i64,
+    library_ids: &[i64],
+) -> Result<bool, AppError> {
+    if library_ids.is_empty() {
+        return Ok(false);
+    }
+    let placeholders: Vec<String> = library_ids.iter().map(|_| "?".to_string()).collect();
+    let query = format!(
+        "SELECT COUNT(*) FROM faces f
+         INNER JOIN photos p ON p.id = f.photo_id
+         WHERE f.id = ? AND p.library_id IN ({})",
+        placeholders.join(",")
+    );
+    let mut q = sqlx::query_as::<_, (i64,)>(&query).bind(face_id);
+    for id in library_ids {
+        q = q.bind(id);
+    }
+    let (count,) = q.fetch_one(pool).await?;
+    Ok(count > 0)
 }
 
 pub async fn has_faces_processed(pool: &DbPool, photo_id: i64) -> Result<bool, AppError> {
@@ -1249,7 +1442,15 @@ pub async fn insert_uploaded_photo(
     file_hash: Option<&str>,
 ) -> Result<i64, AppError> {
     let result = sqlx::query(
-        "INSERT OR IGNORE INTO photos (file_path, file_name, file_size, mime_type, library_id, file_hash) VALUES (?, ?, ?, ?, ?, ?)"
+        "INSERT INTO photos (file_path, file_name, file_size, mime_type, library_id, file_hash)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(file_path) DO UPDATE SET
+            file_name = excluded.file_name,
+            file_size = excluded.file_size,
+            mime_type = excluded.mime_type,
+            library_id = excluded.library_id,
+            file_hash = excluded.file_hash
+         RETURNING id",
     )
     .bind(file_path)
     .bind(file_name)
@@ -1257,9 +1458,10 @@ pub async fn insert_uploaded_photo(
     .bind(mime_type)
     .bind(library_id)
     .bind(file_hash)
-    .execute(pool)
+    .fetch_one(pool)
     .await?;
-    Ok(result.last_insert_rowid())
+    let id: i64 = sqlx::Row::get(&result, 0);
+    Ok(id)
 }
 
 // ─── Tags ──────────────────────────────────────

@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { type AxiosError } from 'axios';
 import { authApi } from '../api';
 
 interface LoginProps {
@@ -12,11 +13,11 @@ export default function Login({ onLogin }: LoginProps) {
     const [isSetup, setIsSetup] = useState<boolean | null>(null);
     const [loading, setLoading] = useState(false);
 
-    useState(() => {
+    useEffect(() => {
         authApi.setupStatus().then((res) => {
             setIsSetup(res.data.needs_setup);
         }).catch(() => setIsSetup(false));
-    });
+    }, []);
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -28,8 +29,8 @@ export default function Login({ onLogin }: LoginProps) {
             const res = await action(username, password);
             const data = res.data;
             onLogin(data.user, data.token);
-        } catch (err: any) {
-            setError(err.response?.data?.error || '登录失败，请重试');
+        } catch (err) {
+            setError((err as AxiosError<{ error?: string }>).response?.data?.error || '登录失败，请重试');
         } finally {
             setLoading(false);
         }

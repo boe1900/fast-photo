@@ -127,7 +127,8 @@ curl -X POST http://localhost:3000/api/auth/login \
 |------|------|------|
 | `/api/photos/timeline` | GET | 时间线（分页） `?page=1&per_page=50` |
 | `/api/photos/folders` | GET | 文件夹列表 |
-| `/api/photos/folders/contents` | GET | 文件夹内容 `?path=...` |
+| `/api/photos/folder-contents` | GET | 文件夹内容 `?path=...` |
+| `/api/photos/folders/contents` | GET | 文件夹内容兼容别名 `?path=...` |
 | `/api/photos/{id}` | GET | 照片详情（含 EXIF） |
 | `/api/photos/{id}/thumbnail/{size}` | GET | 缩略图 `size: small/medium/large` |
 | `/api/photos/{id}/original` | GET | 原始文件 |
@@ -160,7 +161,8 @@ curl -X POST http://localhost:3000/api/auth/login \
 
 | 端点 | 方法 | 说明 |
 |------|------|------|
-| `/api/photos/search` | GET | CLIP 语义搜索 `?q=日落海滩` |
+| `/api/photos/search` | GET | 关键词搜索（文件名/相机信息） `?q=canon` |
+| `/api/ai/semantic-search` | GET | CLIP 语义搜索 `?q=日落海滩&limit=50` |
 
 ### 前端测试
 
@@ -176,10 +178,10 @@ curl -X POST http://localhost:3000/api/auth/login \
 
 | 端点 | 方法 | 说明 |
 |------|------|------|
-| `/api/ai/classify/{id}` | POST | 对单张照片进行场景分类 |
-| `/api/ai/classify-all` | POST | 批量分类所有照片 |
-| `/api/ai/embed/{id}` | POST | 生成 CLIP 嵌入向量 |
-| `/api/ai/embed-all` | POST | 批量生成嵌入向量 |
+| `/api/ai/process` | POST | 后台批量处理：生成嵌入 + 场景标签 |
+| `/api/ai/tags` | GET | 获取场景标签统计 |
+| `/api/ai/tags/{id}/photos` | GET | 查看某个场景标签下照片 |
+| `/api/ai/semantic-search` | GET | 语义搜索照片 |
 
 ### 前端测试
 
@@ -352,6 +354,8 @@ curl -X POST http://localhost:3000/api/auth/login \
 ### DB 字段
 
 `photos.phash` (TEXT, nullable) — 感知哈希，用于识别视觉相似照片
+
+> 注：新上传/新扫描的图片会自动计算 `phash`。旧数据如需参与重复检测，请重新扫描图库。
 
 ### 前端测试
 
