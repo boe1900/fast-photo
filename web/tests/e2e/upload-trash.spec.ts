@@ -19,6 +19,11 @@ interface TimelinePhoto {
   file_name: string;
 }
 
+interface UploadResult {
+  id: number;
+  file_name: string;
+}
+
 async function registerUser(request: APIRequestContext, prefix: string): Promise<AuthUser> {
   const username = `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const password = 'e2e-pass-123';
@@ -48,7 +53,7 @@ async function uploadViaApi(
   request: APIRequestContext,
   token: string,
   fileName: string
-): Promise<number> {
+): Promise<UploadResult> {
   const res = await request.post(`${API}/photos/upload`, {
     headers: { Authorization: `Bearer ${token}` },
     multipart: {
@@ -62,7 +67,10 @@ async function uploadViaApi(
   expect(res.ok()).toBeTruthy();
   const body = await res.json();
   if (body?.uploaded?.[0]?.id) {
-    return body.uploaded[0].id as number;
+    return {
+      id: body.uploaded[0].id as number,
+      file_name: (body.uploaded[0].file_name as string) || fileName,
+    };
   }
 
   const timeline = await request.get(`${API}/photos/timeline`, {
@@ -73,7 +81,10 @@ async function uploadViaApi(
   const tl = (await timeline.json()) as { data?: TimelinePhoto[] };
   const found = (tl.data || []).find((p) => p.file_name === fileName) || tl.data?.[0];
   expect(found?.id).toBeTruthy();
-  return found.id as number;
+  return {
+    id: found.id as number,
+    file_name: found.file_name,
+  };
 }
 
 test.describe('Upload and Trash', () => {
@@ -115,9 +126,9 @@ test.describe('Upload and Trash', () => {
   test('trash page shows deleted photo and can restore', async ({ page, request }) => {
     const user = await registerUser(request, 'e2e_trash');
     await createLibrary(request, user.token, `trash-${Date.now()}`);
-    const photoId = await uploadViaApi(request, user.token, `trash-${Date.now()}.png`);
+    const uploaded = await uploadViaApi(request, user.token, `trash-${Date.now()}.png`);
 
-    const trashRes = await request.post(`${API}/photos/${photoId}/trash`, {
+    const trashRes = await request.post(`${API}/photos/${uploaded.id}/trash`, {
       headers: { Authorization: `Bearer ${user.token}` },
     });
     expect(trashRes.status()).toBe(200);
@@ -134,5 +145,35 @@ test.describe('Upload and Trash', () => {
 
     await page.locator('.trash-actions button[title="还原"]').first().click();
     await expect(page.getByText('回收站是空的')).toBeVisible({ timeout: 10000 });
+  });
+
+  test('duplicate upload renames file and empty trash reclaims original name', async ({ request }) => {
+    const user = await registerUser(request, 'e2e_upload_collision');
+    await createLibrary(request, user.token, `upload-collision-${Date.now()}`);
+
+    const dupBaseName = `dup-${Date.now()}.png`;
+    const dupFirst = await uploadViaApi(request, user.token, dupBaseName);
+    const dupSecond = await uploadViaApi(request, user.token, dupBaseName);
+    expect(dupFirst.file_name).toBe(dupBaseName);
+    expect(dupSecond.file_name).toMatch(/^dup-\d+ \(1\)\.png$/);
+
+    const reclaimName = `reclaim-${Date.now()}.png`;
+    const reclaimFirst = await uploadViaApi(request, user.token, reclaimName);
+    expect(reclaimFirst.file_name).toBe(reclaimName);
+
+    const trashRes = await request.post(`${API}/photos/${reclaimFirst.id}/trash`, {
+      headers: { Authorization: `Bearer ${user.token}` },
+    });
+    expect(trashRes.status()).toBe(200);
+
+    const emptyRes = await request.post(`${API}/photos/trash/empty`, {
+      headers: { Authorization: `Bearer ${user.token}` },
+    });
+    expect(emptyRes.status()).toBe(200);
+    const emptyBody = await emptyRes.json();
+    expect(emptyBody.deleted).toBe(1);
+
+    const reclaimSecond = await uploadViaApi(request, user.token, reclaimName);
+    expect(reclaimSecond.file_name).toBe(reclaimName);
   });
 });
