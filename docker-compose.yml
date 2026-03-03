@@ -3,7 +3,7 @@ services:
     build: .
     container_name: fast-photo
     ports:
-      - "8080:8080"
+      - "18080:8080"
     volumes:
       - ./data:/app/data
       - ./thumbnails:/app/thumbnails

@@ -1,8 +1,8 @@
 # ── Build stage (Rust backend) ──
-FROM rust:1.85-slim AS rust-builder
+FROM rust:1.88-trixie AS rust-builder
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y pkg-config libssl-dev g++ && rm -rf /var/lib/apt/lists/*
 
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
@@ -20,7 +20,7 @@ COPY web/ ./
 RUN npm run build
 
 # ── Runtime stage ──
-FROM debian:bookworm-slim AS runtime
+FROM debian:trixie-slim AS runtime
 
 RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib/apt/lists/*
 
