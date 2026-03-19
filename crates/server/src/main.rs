@@ -17,6 +17,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::watch;
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -91,6 +92,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/healthz", get(healthz))
         .nest("/api", routes::api_routes())
+        .fallback_service(ServeDir::new("web/dist"))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             observability::track_requests,
